@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Capability for the main window",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "opener:default",
+    "thermal-printer:allow-list-thermal-printers",
+    "thermal-printer:allow-print-thermal-printer",
+    "thermal-printer:allow-test-thermal-printer",
+    "dialog:allow-open",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "dialog:allow-save",
+    "dialog:allow-confirm",
+    "dialog:allow-message"
+  ]
+}

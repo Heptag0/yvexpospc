@@ -1,0 +1,199 @@
+// YvexPOS Móvil — Pruebas de las reglas de la tienda (src/base/tiendaReglas.ts).
+//
+// Uso:   node test-tienda-movil.mjs
+// Compila tiendaReglas.ts a JS temporal con el tsc del proyecto y ejerce
+// las funciones PURAS: slugs con acentos, emojis, espacios y nombres largos;
+// whatsapp con +52, espacios, guiones y números cortos/largos.
+
+import { execSync } from "node:child_process";
+import { rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import assert from "node:assert/strict";
+
+const TMP = ".tmp_tienda_test";
+
+console.log("· Compilando src/base/tiendaReglas.ts …");
+execSync(
+  `node node_modules/typescript/bin/tsc src/base/tiendaReglas.ts --outDir ${TMP}` +
+    ` --module commonjs --target es2017 --moduleResolution node --skipLibCheck`,
+  { stdio: "inherit" }
+);
+
+const require = createRequire(import.meta.url);
+const {
+  sugerirSlug,
+  whatsappValido,
+  armarTextoAyuda,
+  urlPublica,
+  normalizarSlug,
+  slugFormatoValido,
+  urlSubdominio,
+  plantillaParaGiro,
+  pesosACentavos,
+  normalizarRed,
+  linkPagoValido,
+} = require(`./${TMP}/tiendaReglas.js`);
+
+// ---------------------------------------------------------------------------
+// sugerirSlug
+// ---------------------------------------------------------------------------
+
+assert.equal(sugerirSlug("Abarrotes Lupita"), "abarrotes-lupita", "espacios -> guiones");
+assert.equal(sugerirSlug("Tienda Éxito"), "tienda-exito", "sin acentos");
+assert.equal(sugerirSlug("Doña María"), "dona-maria", "ñ -> n");
+assert.equal(sugerirSlug("¡La Esquina! 🌮"), "la-esquina", "emojis y signos fuera");
+assert.equal(sugerirSlug("   Papelería   Azul   "), "papeleria-azul", "espacios laterales");
+assert.equal(sugerirSlug("A -- B__C"), "a-b-c", "guiones colapsados y guiones bajos");
+assert.equal(sugerirSlug("Café 24/7"), "cafe-24-7", "números se conservan");
+assert.equal(sugerirSlug("---"), "mi-tienda", "solo signos -> mi-tienda");
+assert.equal(sugerirSlug(""), "mi-tienda", "vacío -> mi-tienda");
+assert.equal(sugerirSlug("   "), "mi-tienda", "solo espacios -> mi-tienda");
+// @ts-ignore: a propósito, entrada que no es string
+assert.equal(sugerirSlug(null), "mi-tienda", "null -> mi-tienda");
+
+// Máx. 40 caracteres, sin guion colgando.
+const largo = sugerirSlug("La Tiendita Más Bonita de Toda la Colonia del Valle Centro");
+assert.ok(largo.length <= 40, "máx. 40 caracteres");
+assert.ok(!largo.endsWith("-"), "sin guion colgando tras el recorte");
+assert.equal(largo, "la-tiendita-mas-bonita-de-toda-la-coloni", "recorte exacto");
+
+// ---------------------------------------------------------------------------
+// whatsappValido
+// ---------------------------------------------------------------------------
+
+assert.equal(whatsappValido("5512345678"), "5512345678", "10 dígitos pelones");
+assert.equal(whatsappValido("+52 55 1234 5678"), "525512345678", "+52 con espacios");
+assert.equal(whatsappValido("52-1-55-1234-5678"), "5215512345678", "guiones fuera");
+assert.equal(whatsappValido("(55) 1234 5678"), "5512345678", "paréntesis fuera");
+assert.equal(whatsappValido("12345"), null, "muy corto");
+assert.equal(whatsappValido("1234567890123456"), null, "muy largo (16)");
+assert.equal(whatsappValido(""), null, "vacío");
+assert.equal(whatsappValido("hola"), null, "letras");
+assert.equal(whatsappValido(null), null, "null");
+assert.equal(whatsappValido(undefined), null, "undefined");
+// 15 dígitos (máximo internacional) sí cuadra.
+assert.equal(whatsappValido("123456789012345"), "123456789012345", "15 dígitos ok");
+
+// ---------------------------------------------------------------------------
+// armarTextoAyuda / urlPublica
+// ---------------------------------------------------------------------------
+
+const texto = armarTextoAyuda("https://tienda.yvexiq.com/t/abarrotes-lupita", "Abarrotes Lupita");
+assert.ok(texto.includes("Abarrotes Lupita"), "lleva el nombre del negocio");
+assert.ok(texto.includes("https://tienda.yvexiq.com/t/abarrotes-lupita"), "lleva la URL");
+assert.ok(texto.toLowerCase().includes("whatsapp"), "menciona WhatsApp");
+
+assert.ok(
+  armarTextoAyuda("https://tienda.yvexiq.com/t/x", "").includes("mi negocio"),
+  "sin nombre -> 'mi negocio'"
+);
+
+assert.equal(
+  urlPublica("https://tienda.yvexiq.com/", "mi-tienda"),
+  "https://tienda.yvexiq.com/t/mi-tienda",
+  "sin doble diagonal"
+);
+
+// ---------------------------------------------------------------------------
+// normalizarSlug / slugFormatoValido (v2 — "Tu enlace")
+// ---------------------------------------------------------------------------
+
+assert.equal(normalizarSlug("Mi Tienda Bonita"), "mi-tienda-bonita", "minúsculas y guiones");
+assert.equal(normalizarSlug("Café   24"), "cafe-24", "acentos fuera, espacios a guion");
+assert.equal(normalizarSlug("--hola--"), "hola", "sin guiones laterales");
+assert.equal(normalizarSlug("a--b"), "a-b", "guiones dobles colapsados");
+assert.equal(normalizarSlug("¡Qué_Onda!"), "que-onda", "signos y guiones bajos");
+assert.equal(normalizarSlug(""), "", "vacío -> vacío (NO inventa default)");
+assert.equal(normalizarSlug("---"), "", "solo signos -> vacío");
+// @ts-ignore: a propósito, entrada que no es string
+assert.equal(normalizarSlug(null), "", "null -> vacío");
+assert.ok(normalizarSlug("un nombre de tienda increíblemente largo para probar el límite").length <= 40, "máx. 40");
+
+assert.ok(slugFormatoValido("mi-tienda"), "slug normal ok");
+assert.ok(slugFormatoValido("abc"), "3 chars ok");
+assert.ok(!slugFormatoValido("ab"), "muy corto");
+assert.ok(!slugFormatoValido(""), "vacío no");
+assert.ok(!slugFormatoValido("-hola"), "guion inicial no");
+assert.ok(!slugFormatoValido("ho--la"), "doble guion no");
+assert.ok(!slugFormatoValido("HOLA"), "mayúsculas no (debe normalizarse antes)");
+assert.ok(!slugFormatoValido("a".repeat(41)), "más de 40 no");
+
+// ---------------------------------------------------------------------------
+// urlSubdominio / plantillaParaGiro (v2)
+// ---------------------------------------------------------------------------
+
+assert.equal(urlSubdominio("abarrotes-lupita"), "https://abarrotes-lupita.yvexiq.com", "subdominio");
+
+// Espejo del backend (tienda_utils.GIRO_A_PLANTILLA):
+assert.equal(plantillaParaGiro("ropa"), "boutique");
+assert.equal(plantillaParaGiro("belleza"), "boutique");
+assert.equal(plantillaParaGiro("mascotas"), "boutique");
+assert.equal(plantillaParaGiro("cafeteria"), "menu");
+assert.equal(plantillaParaGiro("restaurante"), "menu");
+assert.equal(plantillaParaGiro("abarrotes"), "catalogo");
+assert.equal(plantillaParaGiro("farmacia"), "catalogo");
+assert.equal(plantillaParaGiro("ferreteria"), "catalogo");
+assert.equal(plantillaParaGiro("electronica"), "catalogo");
+assert.equal(plantillaParaGiro("otro"), "catalogo");
+assert.equal(plantillaParaGiro("floreria"), "aurora", "giro desconocido -> aurora");
+assert.equal(plantillaParaGiro(""), "aurora", "vacío -> aurora");
+assert.equal(plantillaParaGiro(null), "aurora", "null -> aurora");
+assert.equal(plantillaParaGiro(" ROPA "), "boutique", "mayúsculas y espacios");
+
+// ---------------------------------------------------------------------------
+// pesosACentavos (v2 — costo de envío)
+// ---------------------------------------------------------------------------
+
+assert.equal(pesosACentavos("30"), 3000, "pesos enteros");
+assert.equal(pesosACentavos("35.50"), 3550, "decimales con punto");
+assert.equal(pesosACentavos("35,50"), 3550, "coma decimal");
+assert.equal(pesosACentavos("$45.00"), 4500, "signo de pesos");
+assert.equal(pesosACentavos("0"), 0, "cero (envío gratis)");
+assert.equal(pesosACentavos("12.345"), 1235, "redondeo al centavo");
+assert.equal(pesosACentavos(""), null, "vacío -> null");
+assert.equal(pesosACentavos("abc"), null, "letras -> null");
+assert.equal(pesosACentavos("-10"), null, "negativo -> null");
+assert.equal(pesosACentavos(null), null, "null -> null");
+
+// ---------------------------------------------------------------------------
+// normalizarRed (v2 — instagram/facebook/tiktok)
+// ---------------------------------------------------------------------------
+
+assert.equal(normalizarRed("instagram", "@Tutienda"), "@tutienda", "@ y minúsculas");
+assert.equal(normalizarRed("instagram", "tutienda"), "@tutienda", "sin @");
+assert.equal(
+  normalizarRed("instagram", "https://instagram.com/tutienda"),
+  "@tutienda",
+  "URL completa"
+);
+assert.equal(
+  normalizarRed("instagram", "instagram.com/tutienda?igsh=abc"),
+  "@tutienda",
+  "URL sin protocolo y con query"
+);
+assert.equal(normalizarRed("tiktok", "https://www.tiktok.com/@tutienda"), "@tutienda", "tiktok con www");
+assert.equal(normalizarRed("tiktok", "@Tutienda_22"), "@tutienda_22", "tiktok directo");
+assert.equal(normalizarRed("facebook", "Mi Pagina"), "MiPagina", "facebook sin @, espacios fuera");
+assert.equal(
+  normalizarRed("facebook", "https://www.facebook.com/mi.pagina"),
+  "mi.pagina",
+  "facebook URL"
+);
+assert.equal(normalizarRed("instagram", ""), "", "vacío -> vacío");
+assert.equal(normalizarRed("instagram", "   "), "", "espacios -> vacío");
+assert.equal(normalizarRed("tiktok", null), "", "null -> vacío");
+
+// ---------------------------------------------------------------------------
+// linkPagoValido (v2)
+// ---------------------------------------------------------------------------
+
+assert.ok(linkPagoValido(""), "vacío es válido (opcional)");
+assert.ok(linkPagoValido("   "), "solo espacios = vacío");
+assert.ok(linkPagoValido("https://mpago.la/123abc"), "https ok");
+assert.ok(linkPagoValido("http://pagos.mx/link"), "http ok");
+assert.ok(!linkPagoValido("mpago.la/123"), "sin protocolo no");
+assert.ok(!linkPagoValido("págamelo después"), "texto libre no");
+assert.ok(!linkPagoValido(null), "null no");
+
+rmSync(TMP, { recursive: true, force: true });
+console.log("TODAS LAS PRUEBAS PASARON");
