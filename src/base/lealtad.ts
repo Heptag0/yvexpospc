@@ -6,13 +6,19 @@
 // Reglas de la casa:
 //   - Dinero SIEMPRE en centavos enteros; puntos en enteros.
 //   - Soft delete (`eliminado`), nunca borrado físico.
-//   - LOCAL-ONLY v1 (como proveedores): nada de aquí se encola a cola_sync.
+//   - SINCRONIZADO: los movimientos de puntos se encolan (bitácora de
+//     solo-inserción). El SALDO (clientes.puntos) NUNCA se sube como
+//     columna directa — lo recalcula el servidor sumando movimientos, para
+//     que dos cajas puedan sumar/restar puntos al mismo cliente sin
+//     pisarse (mismo principio que el stock). El saldo real llega de
+//     vuelta en la próxima bajada de "clientes".
 //   - NINGÚN canje/descuento se aplica solo: aquí solo se registran
 //     movimientos YA confirmados por el usuario en pantalla.
 
 import { bd, uuid, ahoraISO } from "./db";
 import { leerConfig, guardarConfig } from "./config";
 import { puntosPorCompra } from "./lealtadReglas";
+import { encolar } from "./sync";
 
 export type Cliente = {
   id: string;
@@ -107,6 +113,14 @@ export async function crearCliente(
      VALUES (?,?,?,?,?,NULL,0,0,?,?)`,
     [id, codigo, nombreLimpio, telefono?.trim() || null, correoOk, ahora, ahora]
   );
+  // Nota: "limite_credito_centavos" / "saldo_centavos" no van aquí porque el
+  // móvil no maneja crédito — el servidor los rellena con su default (0) al
+  // recibir un payload parcial. No hace falta mandarlos.
+  await encolar("clientes", id, {
+    id, nombre: nombreLimpio, telefono: telefono?.trim() || null,
+    correo: correoOk, codigo, notas: null,
+    creado_en: ahora, actualizado_en: ahora, eliminado: 0,
+  });
   return { id, codigo, nombre: nombreLimpio, telefono: telefono?.trim() || null, correo: correoOk, notas: null, puntos: 0, creado_en: ahora };
 }
 
@@ -120,20 +134,29 @@ export async function editarCliente(
   const nombreLimpio = nombre.trim();
   if (!nombreLimpio) throw new Error("Escribe el nombre del cliente.");
   const db = await bd();
+  const actualizado_en = ahoraISO();
+  const correoOk = correoLimpio(correo);
+  const notasOk = notas?.trim() || null;
   await db.runAsync(
     `UPDATE clientes SET nombre = ?, telefono = ?, correo = ?, notas = ?, actualizado_en = ?
      WHERE id = ?`,
-    [nombreLimpio, telefono?.trim() || null, correoLimpio(correo), notas?.trim() || null, ahoraISO(), id]
+    [nombreLimpio, telefono?.trim() || null, correoOk, notasOk, actualizado_en, id]
   );
+  await encolar("clientes", id, {
+    id, nombre: nombreLimpio, telefono: telefono?.trim() || null,
+    correo: correoOk, notas: notasOk, actualizado_en,
+  }, "update");
 }
 
 /** Borrado SUAVE: el cliente y su historial de puntos se conservan. */
 export async function eliminarCliente(id: string): Promise<void> {
   const db = await bd();
+  const actualizado_en = ahoraISO();
   await db.runAsync(
     "UPDATE clientes SET eliminado = 1, actualizado_en = ? WHERE id = ?",
-    [ahoraISO(), id]
+    [actualizado_en, id]
   );
+  await encolar("clientes", id, { id, eliminado: 1, actualizado_en }, "update");
 }
 
 /** Búsqueda por nombre, teléfono, correo o código (o lista completa si el
@@ -212,16 +235,22 @@ export async function registrarVisita(clienteId: string): Promise<ResultadoVisit
   if (ya) return { otorgados: 0, motivo: "ya registrada hoy" };
 
   const ahora = ahoraISO();
+  const movId = uuid();
   await db.withTransactionAsync(async () => {
     await db.runAsync(
       `INSERT INTO puntos_movimientos (id, cliente_id, venta_id, tipo, puntos, nota, creado_en)
        VALUES (?,?,NULL,'visita',?,?,?)`,
-      [uuid(), clienteId, reglas.puntosVisita, "Visita del día", ahora]
+      [movId, clienteId, reglas.puntosVisita, "Visita del día", ahora]
     );
     await db.runAsync(
       "UPDATE clientes SET puntos = puntos + ?, actualizado_en = ? WHERE id = ?",
       [reglas.puntosVisita, ahora, clienteId]
     );
+  });
+  await encolar("puntos_movimientos", movId, {
+    id: movId, cliente_id: clienteId, venta_id: null, tipo: "visita",
+    puntos: reglas.puntosVisita, nota: "Visita del día",
+    creado_en: ahora, actualizado_en: ahora,
   });
   return { otorgados: reglas.puntosVisita };
 }
@@ -246,12 +275,13 @@ export async function acumularPorVenta(
   const ganados = puntosPorCompra(totalCentavos, reglas.pesosPorPunto);
   const db = await bd();
   const ahora = ahoraISO();
+  const movId = uuid();
   await db.withTransactionAsync(async () => {
     if (ganados > 0) {
       await db.runAsync(
         `INSERT INTO puntos_movimientos (id, cliente_id, venta_id, tipo, puntos, nota, creado_en)
          VALUES (?,?,?,'compra',?,?,?)`,
-        [uuid(), clienteId, ventaId, ganados, "Puntos por tu compra", ahora]
+        [movId, clienteId, ventaId, ganados, "Puntos por tu compra", ahora]
       );
       await db.runAsync(
         "UPDATE clientes SET puntos = puntos + ?, actualizado_en = ? WHERE id = ?",
@@ -259,6 +289,13 @@ export async function acumularPorVenta(
       );
     }
   });
+  if (ganados > 0) {
+    await encolar("puntos_movimientos", movId, {
+      id: movId, cliente_id: clienteId, venta_id: ventaId, tipo: "compra",
+      puntos: ganados, nota: "Puntos por tu compra",
+      creado_en: ahora, actualizado_en: ahora,
+    });
+  }
   const c = await clientePorId(clienteId);
   return { otorgados: ganados, saldo: c?.puntos ?? 0 };
 }
@@ -284,23 +321,22 @@ export async function canjearPuntos(
     );
   }
   const ahora = ahoraISO();
+  const movId = uuid();
+  const nota = `Canje: $${(descuentoCentavos / 100).toFixed(2)} de descuento`;
   await db.withTransactionAsync(async () => {
     await db.runAsync(
       `INSERT INTO puntos_movimientos (id, cliente_id, venta_id, tipo, puntos, nota, creado_en)
        VALUES (?,?,?,'canje',?,?,?)`,
-      [
-        uuid(),
-        clienteId,
-        ventaId,
-        -puntosUsados,
-        `Canje: $${(descuentoCentavos / 100).toFixed(2)} de descuento`,
-        ahora,
-      ]
+      [movId, clienteId, ventaId, -puntosUsados, nota, ahora]
     );
     await db.runAsync(
       "UPDATE clientes SET puntos = puntos - ?, actualizado_en = ? WHERE id = ?",
       [puntosUsados, ahora, clienteId]
     );
+  });
+  await encolar("puntos_movimientos", movId, {
+    id: movId, cliente_id: clienteId, venta_id: ventaId, tipo: "canje",
+    puntos: -puntosUsados, nota, creado_en: ahora, actualizado_en: ahora,
   });
   const c = await clientePorId(clienteId);
   return { otorgados: -puntosUsados, saldo: c?.puntos ?? 0 };
@@ -361,9 +397,19 @@ function numeroRegla(valor: string | null, defecto: number): number {
 }
 
 export async function guardarReglas(r: ReglasLealtad): Promise<void> {
-  await guardarConfig("lealtad_activa", r.activa ? "1" : "0");
-  await guardarConfig("lealtad_pesos_por_punto", String(r.pesosPorPunto));
-  await guardarConfig("lealtad_puntos_visita", String(r.puntosVisita));
-  await guardarConfig("lealtad_valor_punto_centavos", String(r.valorPuntoCentavos));
-  await guardarConfig("lealtad_tope_descuento_pct", String(r.topeDescuentoPct));
+  const pares: [string, string][] = [
+    ["lealtad_activa", r.activa ? "1" : "0"],
+    ["lealtad_pesos_por_punto", String(r.pesosPorPunto)],
+    ["lealtad_puntos_visita", String(r.puntosVisita)],
+    ["lealtad_valor_punto_centavos", String(r.valorPuntoCentavos)],
+    ["lealtad_tope_descuento_pct", String(r.topeDescuentoPct)],
+  ];
+  // Guardamos local con guardarConfig (como siempre) y ADEMÁS encolamos
+  // aquí explícitamente — guardarConfig es genérico y lo usan también
+  // preferencias que son de ESTE teléfono (usuario activo, sync_auto), así
+  // que no se debe encolar ahí. Las reglas de lealtad sí son del negocio.
+  for (const [clave, valor] of pares) {
+    await guardarConfig(clave, valor);
+    await encolar("config", clave, { clave, valor }, "update");
+  }
 }

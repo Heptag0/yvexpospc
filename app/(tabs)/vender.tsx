@@ -69,6 +69,8 @@ import {
   buscarProductoPorCodigo,
   consultarNombreUniversal,
 } from "@/src/base/codigos";
+import { tomarCotizacionPendiente } from "@/src/base/handoff";
+import { marcarConvertida } from "@/src/base/cotizaciones";
 
 // Departamento seleccionado: null = pantalla de departamentos; "__todos__" =
 // todo el catálogo; un id = ese departamento.
@@ -122,6 +124,9 @@ export default function VenderScreen() {
   const [clienteTicket, setClienteTicket] = useState<Cliente | null>(null);
   const [reglas, setReglas] = useState<ReglasLealtad | null>(null);
   const [modalClienteAbierto, setModalClienteAbierto] = useState(false);
+  // Si este ticket viene de "Convertir a venta" en Cotizaciones, aquí queda
+  // su id hasta que el cobro tenga éxito — entonces se marca "convertida".
+  const [cotizacionIdEnCurso, setCotizacionIdEnCurso] = useState<string | null>(null);
 
   const cargar = useCallback(async () => {
     const [t, prods, cats, cnt, m, r] = await Promise.all([
@@ -138,6 +143,25 @@ export default function VenderScreen() {
     setConteos(cnt);
     setModo(m);
     setReglas(r);
+
+    // ¿Venimos de "Convertir a venta" en Cotizaciones? Carga el carrito con
+    // el precio QUE SE COTIZÓ (aunque el catálogo haya cambiado desde
+    // entonces — cotizar es prometer un precio, no una referencia).
+    const cot = tomarCotizacionPendiente();
+    if (cot) {
+      setCarrito(
+        cot.lineas.map((l) => ({
+          producto_id: l.producto_id ?? `cot-${l.id}`,
+          nombre: l.descripcion,
+          precio_centavos: l.precio_unitario_centavos,
+          cantidad: l.cantidad,
+          es_kit: false,
+        }))
+      );
+      setCotizacionIdEnCurso(cot.id);
+      setTicketAbierto(true);
+      mostrarAviso(`Cotización #${cot.folio} cargada — cobra normal para convertirla en venta.`);
+    }
   }, []);
 
   useFocusEffect(
@@ -682,6 +706,17 @@ export default function VenderScreen() {
           onCerrar={() => setCobroAbierto(false)}
           onCobrado={async (r, metodo, pagadoCentavos, canje) => {
             setCobroAbierto(false);
+            // Si este ticket venía de una cotización, la cerramos como
+            // "convertida". Best-effort: la venta YA está hecha, no vale la
+            // pena interrumpir el flujo de cobro por esto.
+            if (cotizacionIdEnCurso) {
+              try {
+                await marcarConvertida(cotizacionIdEnCurso, r.venta_id);
+              } catch (err) {
+                console.warn("No se pudo marcar la cotización como convertida:", err);
+              }
+              setCotizacionIdEnCurso(null);
+            }
             // El ticket protagonista: se construye con el carrito ANTES de
             // vaciarlo (la lógica de cobro ya terminó; esto es solo recibo).
             let extrasLealtad: { clienteNombre: string; puntosGanados: number; saldoPuntos: number } | undefined;

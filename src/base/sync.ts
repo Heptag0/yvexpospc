@@ -344,6 +344,16 @@ type Bajada = {
   pagos: any[];
   caja_sesiones: any[];
   usuarios?: any[]; // cajeros de otras cajas (sin PIN), desde backend nuevo
+  // Clientes del negocio: compartidos. `puntos` YA viene calculado por el
+  // servidor (nunca se recalcula aquí, solo se adopta tal cual).
+  clientes?: any[];
+  proveedores?: any[];
+  compras?: any[];
+  // Bitácora de puntos de OTRAS cajas (rastro; el saldo real viaja en `clientes`).
+  puntos_movimientos?: any[];
+  // Config del negocio (lista blanca del servidor: lealtad, IVA, datos
+  // fiscales). Nunca preferencias por-dispositivo (usuario activo, etc.).
+  config?: any[];
 };
 
 async function bajar(
@@ -528,6 +538,94 @@ async function bajar(
          ON CONFLICT(id) DO NOTHING`,
         [pg.id, pg.venta_id, pg.metodo, pg.monto_centavos, pg.creado_en]
       );
+    }
+
+    // --- Clientes del negocio (compartidos). `puntos` es el saldo REAL
+    // que calculó el servidor: se adopta tal cual, nunca se suma aquí. ---
+    for (const cli of (d.clientes ?? [])) {
+      await db.runAsync(
+        `INSERT INTO clientes
+          (id, codigo, nombre, telefono, correo, notas, puntos, eliminado, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           codigo = excluded.codigo, nombre = excluded.nombre,
+           telefono = excluded.telefono, correo = excluded.correo,
+           notas = excluded.notas, puntos = excluded.puntos,
+           eliminado = excluded.eliminado, actualizado_en = excluded.actualizado_en`,
+        [
+          cli.id, cli.codigo ?? null, cli.nombre, cli.telefono ?? null,
+          cli.correo ?? null, cli.notas ?? null, cli.puntos ?? 0,
+          cli.eliminado ? 1 : 0, cli.creado_en, cli.actualizado_en,
+        ]
+      );
+      // NOTA: el móvil no tiene columnas de crédito (limite_credito_centavos,
+      // saldo_centavos) — el payload del servidor las trae porque el PC sí
+      // las usa, pero aquí simplemente se ignoran (no están en el INSERT).
+      aplicados++;
+    }
+
+    for (const prov of (d.proveedores ?? [])) {
+      await db.runAsync(
+        `INSERT INTO proveedores
+          (id, nombre, contacto, telefono, notas, dias_visita, eliminado, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           nombre = excluded.nombre, contacto = excluded.contacto,
+           telefono = excluded.telefono, notas = excluded.notas,
+           dias_visita = excluded.dias_visita, eliminado = excluded.eliminado,
+           actualizado_en = excluded.actualizado_en`,
+        [
+          prov.id, prov.nombre, prov.contacto ?? null, prov.telefono ?? null,
+          prov.notas ?? null, prov.dias_visita ?? null,
+          prov.eliminado ? 1 : 0, prov.creado_en, prov.actualizado_en,
+        ]
+      );
+      aplicados++;
+    }
+
+    for (const c of (d.compras ?? [])) {
+      await db.runAsync(
+        `INSERT INTO compras
+          (id, proveedor_id, proveedor_nombre, folio, fecha, tipo, total_centavos,
+           num_lineas, origen, notas, eliminado, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           eliminado = excluded.eliminado, actualizado_en = excluded.actualizado_en`,
+        [
+          c.id, c.proveedor_id ?? null, c.proveedor_nombre ?? null,
+          c.folio ?? null, c.fecha ?? null, c.tipo ?? "normal",
+          c.total_centavos ?? 0, c.num_lineas ?? 0, c.origen ?? "manual",
+          c.notas ?? null, c.eliminado ? 1 : 0, c.creado_en, c.actualizado_en,
+        ]
+      );
+      aplicados++;
+    }
+
+    for (const m of (d.puntos_movimientos ?? [])) {
+      await db.runAsync(
+        `INSERT INTO puntos_movimientos
+          (id, cliente_id, venta_id, tipo, puntos, nota, creado_en)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO NOTHING`,
+        [m.id, m.cliente_id, m.venta_id ?? null, m.tipo, m.puntos, m.nota ?? null, m.creado_en]
+      );
+      // El saldo real ya llegó en el bloque de `clientes` de arriba — este
+      // insert es solo para que el historial del cliente muestre el
+      // movimiento que hizo la otra caja.
+      aplicados++;
+    }
+
+    // --- Config del negocio (lealtad, IVA, datos fiscales…). El servidor
+    // ya filtra con lista blanca, pero por seguridad extra nunca tocamos
+    // "dispositivo_id" desde aquí tampoco. ---
+    for (const cfg of (d.config ?? [])) {
+      if (cfg.clave === "dispositivo_id") continue;
+      await db.runAsync(
+        `INSERT INTO config (clave, valor) VALUES (?, ?)
+         ON CONFLICT(clave) DO UPDATE SET valor = excluded.valor`,
+        [cfg.clave, cfg.valor]
+      );
+      aplicados++;
     }
     });
   } finally {

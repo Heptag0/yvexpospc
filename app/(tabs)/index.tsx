@@ -52,8 +52,11 @@ import ModalProveedores from "@/src/componentes/ModalProveedores";
 import ModalLealtad from "@/src/componentes/ModalLealtad";
 import ModalTienda from "@/src/componentes/ModalTienda";
 import ModalPedidosWeb from "@/src/componentes/ModalPedidosWeb";
+import ModalCotizaciones from "@/src/componentes/ModalCotizaciones";
 import { estadoTienda } from "@/src/base/tienda";
 import { leerReglas } from "@/src/base/lealtad";
+import ModalDinero from "@/src/componentes/ModalDinero";
+import ModalEtiquetas from "@/src/componentes/ModalEtiquetas";
 import {
   Mision,
   obtenerMisiones,
@@ -194,6 +197,9 @@ export default function InicioScreen() {
   const [modoUso, setModoUso] = useState<ModoUso>("ambos");
   const [proveedoresAbierto, setProveedoresAbierto] = useState(false);
   const [lealtadAbierto, setLealtadAbierto] = useState(false);
+  const [cotizacionesAbierto, setCotizacionesAbierto] = useState(false);
+  const [dineroAbierto, setDineroAbierto] = useState(false);
+  const [etiquetasAbierto, setEtiquetasAbierto] = useState(false);
   const [tiendaAbierto, setTiendaAbierto] = useState(false);
   const [pedidosWebAbierto, setPedidosWebAbierto] = useState(false);
   const [lealtadActiva, setLealtadActiva] = useState(true);
@@ -293,8 +299,10 @@ export default function InicioScreen() {
         `Vendido: ${pesos(c.total_centavos)}\n\n` +
         `Efectivo: ${pesos(c.efectivo_centavos)}\n` +
         `Tarjeta: ${pesos(c.tarjeta_centavos)}\n` +
-        `Fondo inicial: ${pesos(c.fondo_centavos)}\n\n` +
-        `Efectivo esperado en cajón:\n${pesos(c.efectivo_esperado_centavos)}`,
+        `Fondo inicial: ${pesos(c.fondo_centavos)}\n` +
+        (c.entradas_centavos > 0 ? `Entradas de efectivo: ${pesos(c.entradas_centavos)}\n` : "") +
+        (c.salidas_centavos > 0 ? `Salidas de efectivo: −${pesos(c.salidas_centavos)}\n` : "") +
+        `\nEfectivo esperado en cajón:\n${pesos(c.efectivo_esperado_centavos)}`,
       [
         { text: "Seguir vendiendo", style: "cancel" },
         {
@@ -572,6 +580,42 @@ export default function InicioScreen() {
             </View>
             <Text style={est.accesoFlecha}>→</Text>
           </Pressable>
+          <Pressable
+            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
+            onPress={() => setCotizacionesAbierto(true)}
+          >
+            <IconoUI id="cotizacion" size={21} color={T.acento} />
+            <View style={{ flex: 1 }}>
+              <Text style={est.accesoTitulo}>Cotizaciones</Text>
+              <Text style={est.accesoMeta}>Arma un precio sin cobrar y compártelo</Text>
+            </View>
+            <Text style={est.accesoFlecha}>→</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
+            onPress={() => setDineroAbierto(true)}
+          >
+            <IconoUI id="dinero" size={21} color={T.acento} />
+            <View style={{ flex: 1 }}>
+              <Text style={est.accesoTitulo}>Dinero</Text>
+              <Text style={est.accesoMeta}>Tus gastos del negocio y de casa</Text>
+            </View>
+            <Text style={est.accesoFlecha}>→</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
+            onPress={() => setEtiquetasAbierto(true)}
+          >
+            <IconoUI id="etiqueta_nom" size={21} color={T.acento} />
+            <View style={{ flex: 1 }}>
+              <Text style={est.accesoTitulo}>Etiquetado NOM</Text>
+              <Text style={est.accesoMeta}>¿Tu producto necesita sellos de advertencia?</Text>
+            </View>
+            <Text style={est.accesoFlecha}>→</Text>
+          </Pressable>
+          {etiquetasAbierto && (
+        <ModalEtiquetas onCerrar={() => setEtiquetasAbierto(false)} />
+          )}
           {lealtadActiva && (
             <Pressable
               style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
@@ -670,6 +714,23 @@ export default function InicioScreen() {
         <ModalLealtad
           onCerrar={() => setLealtadAbierto(false)}
           onCambio={cargar}
+        />
+      )}
+      {cotizacionesAbierto && (
+        <ModalCotizaciones
+          onCerrar={() => setCotizacionesAbierto(false)}
+          onIrAVenta={() => {
+            setCotizacionesAbierto(false);
+            router.push("/vender");
+          }}
+        />
+      )}
+      {dineroAbierto && (
+        <ModalDinero
+          onCerrar={() => {
+            setDineroAbierto(false);
+            cargar();
+          }}
         />
       )}
       {tiendaAbierto && (

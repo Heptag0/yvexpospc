@@ -121,7 +121,13 @@ export type IdUI =
   // Tienda en línea v2 (promoción y enlace)
   | "compartir" | "copiar" | "enlace" | "basura"
   // Tienda en línea v3 (pedidos web y vista previa)
-  | "pedido" | "ojo";
+  | "pedido" | "ojo"
+    // Cotizaciones
+  | "cotizacion"
+  // Dinero (agenda financiera)
+  | "dinero"
+  // Etiquetado NOM-051
+  | "etiqueta_nom";
 
 const UI: Record<IdUI, string[]> = {
   inicio: ["M3 10l9-7 9 7v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V10z", "M9 22V12h6v10"],
@@ -191,6 +197,13 @@ const UI: Record<IdUI, string[]> = {
   pedido: ["M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2", "M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v2H9V5z", "M9 13h6", "M9 17h4"],
   // Ojo (vista previa de la tienda)
   ojo: ["M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z", "M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"],
+  // --- Cotizaciones ---
+  // Documento con esquina doblada + renglones (cotización/presupuesto)
+    cotizacion: ["M7 3h7l4 4v13a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z", "M14 3v4h4", "M9 9h3", "M9 12.5h6", "M9 16h6"],
+  // Billete con signo de pesos (agenda financiera)
+  dinero: ["M12 2.5v19", "M16.5 6.8c-.8-1.1-2.4-1.8-4.5-1.8-2.8 0-4.5 1.2-4.5 3s1.7 2.6 4.5 3.2 4.8 1.4 4.8 3.4-2 3.4-4.8 3.4c-2.3 0-4-.8-4.8-2"],
+  // Octágono con signo de advertencia (etiquetado NOM-051)
+  etiqueta_nom: ["M9 2.5h6l4.5 4.5v6L15 17.5H9L4.5 13V7z", "M12 7.5v4", "M12 14h.01"],
 };
 
 /** Icono de interfaz. */

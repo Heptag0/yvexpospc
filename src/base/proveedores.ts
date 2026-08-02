@@ -5,9 +5,8 @@
 // registrar compras a mano o marcar los días que pasa cada proveedor para
 // que Inicio le avise ("mañana llega Coca").
 //
-// SYNC (v1): proveedores y compras son LOCAL-ONLY. NO se encolan a
-// cola_sync — el backend todavía no tiene esas tablas; el PC las recibirá
-// en una versión posterior y entonces se enchufa el encolar() aquí.
+// SYNC: proveedores y compras se sincronizan igual que categorías/productos,
+// sin problema de concurrencia (nadie "resta" un proveedor).
 //
 // Dinero SIEMPRE en centavos enteros. Bools INTEGER 0/1. IDs UUID v4.
 // Soft delete vía `eliminado` (las compras conservan el snapshot del nombre).
@@ -15,6 +14,7 @@
 import { bd, uuid, ahoraISO } from "./db";
 import { RespuestaTicket } from "./escaner";
 import { proximaFechaVisita, etiquetaAviso } from "./visitas";
+import { encolar } from "./sync";
 
 // ---------------------------------------------------------------------------
 // Tipos
@@ -137,6 +137,12 @@ export async function crearProveedor(datos: DatosProveedor): Promise<string> {
       ahora,
     ]
   );
+  await encolar("proveedores", id, {
+    id, nombre, contacto: datos.contacto?.trim() || null,
+    telefono: datos.telefono?.trim() || null, notas: datos.notas?.trim() || null,
+    dias_visita: diasAJson(datos.diasVisita), eliminado: 0,
+    creado_en: ahora, actualizado_en: ahora,
+  });
   return id;
 }
 
@@ -144,6 +150,8 @@ export async function editarProveedor(id: string, datos: DatosProveedor): Promis
   const nombre = datos.nombre.trim();
   if (!nombre) throw new Error("El nombre del proveedor no puede estar vacío.");
   const db = await bd();
+  const actualizado_en = ahoraISO();
+  const dias_visita = diasAJson(datos.diasVisita);
   await db.runAsync(
     `UPDATE proveedores
         SET nombre = ?, contacto = ?, telefono = ?, notas = ?, dias_visita = ?, actualizado_en = ?
@@ -153,21 +161,28 @@ export async function editarProveedor(id: string, datos: DatosProveedor): Promis
       datos.contacto?.trim() || null,
       datos.telefono?.trim() || null,
       datos.notas?.trim() || null,
-      diasAJson(datos.diasVisita),
-      ahoraISO(),
+      dias_visita,
+      actualizado_en,
       id,
     ]
   );
+  await encolar("proveedores", id, {
+    id, nombre, contacto: datos.contacto?.trim() || null,
+    telefono: datos.telefono?.trim() || null, notas: datos.notas?.trim() || null,
+    dias_visita, eliminado: 0, actualizado_en,
+  }, "update");
 }
 
 /** Soft delete: el historial de compras NO se borra (guarda el snapshot
  *  del nombre en proveedor_nombre). */
 export async function eliminarProveedor(id: string): Promise<void> {
   const db = await bd();
+  const actualizado_en = ahoraISO();
   await db.runAsync(
     "UPDATE proveedores SET eliminado = 1, actualizado_en = ? WHERE id = ?",
-    [ahoraISO(), id]
+    [actualizado_en, id]
   );
+  await encolar("proveedores", id, { id, eliminado: 1, actualizado_en }, "update");
 }
 
 /** Lista de proveedores activos, cada uno con su resumen de compras.
@@ -306,6 +321,15 @@ export async function registrarCompra(datos: DatosCompra): Promise<string> {
       ahora,
     ]
   );
+  await encolar("compras", id, {
+    id, proveedor_id: proveedorId, proveedor_nombre: proveedorNombre,
+    folio: datos.folio?.trim() || null, fecha: datos.fecha || null,
+    tipo: datos.tipo ?? "normal",
+    total_centavos: Math.max(0, Math.round(datos.totalCentavos)),
+    num_lineas: Math.max(0, Math.round(datos.numLineas ?? 0)),
+    origen: datos.origen ?? "manual", notas: datos.notas?.trim() || null,
+    eliminado: 0, creado_en: ahora, actualizado_en: ahora,
+  });
   return id;
 }
 
@@ -348,10 +372,12 @@ export async function historialCompras(proveedorId?: string | null): Promise<Com
 
 export async function eliminarCompra(id: string): Promise<void> {
   const db = await bd();
+  const actualizado_en = ahoraISO();
   await db.runAsync(
     "UPDATE compras SET eliminado = 1, actualizado_en = ? WHERE id = ?",
-    [ahoraISO(), id]
+    [actualizado_en, id]
   );
+  await encolar("compras", id, { id, eliminado: 1, actualizado_en }, "update");
 }
 
 // ---------------------------------------------------------------------------

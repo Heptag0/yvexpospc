@@ -93,13 +93,82 @@ export async function cerrarTurno(turnoId: string): Promise<void> {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Movimientos de efectivo del cajón
+// ---------------------------------------------------------------------------
+// Dinero que entra o sale del cajón FUERA de las ventas: pagarle al
+// proveedor, un retiro, meter cambio. Sin esto, el corte no puede cuadrar
+// cuando el efectivo se movió por cualquier motivo que no fue una venta.
+
+export type TipoMovimiento = "entrada" | "salida";
+
+export type DatosMovimientoCaja = {
+  cajaSesionId: string;
+  tipo: TipoMovimiento;
+  motivo?: string | null;
+  montoCentavos: number;
+};
+
+/** Registra una entrada o salida de efectivo del cajón. Devuelve el id del
+ *  movimiento (quien lo llame puede guardarlo para enlazarlo, como hace el
+ *  módulo de finanzas con un gasto pagado en efectivo). */
+export async function registrarMovimientoCaja(d: DatosMovimientoCaja): Promise<string> {
+  if (d.montoCentavos <= 0) throw new Error("El monto debe ser mayor a cero.");
+  const db = await bd();
+  const id = uuid();
+  const ahora = ahoraISO();
+  const usuario = await usuarioActivoId();
+  await db.runAsync(
+    `INSERT INTO movimientos_caja
+       (id, caja_sesion_id, tipo, motivo, monto_centavos, usuario_pos_id, creado_en, actualizado_en)
+     VALUES (?,?,?,?,?,?,?,?)`,
+    [id, d.cajaSesionId, d.tipo, d.motivo?.trim() || null, d.montoCentavos, usuario, ahora, ahora]
+  );
+  // El servidor ya conoce esta entidad (está en el MAPA de sync.py), así que
+  // viaja igual que las ventas y los turnos.
+  await encolar("movimientos_caja", id, {
+    id,
+    caja_sesion_id: d.cajaSesionId,
+    tipo: d.tipo,
+    motivo: d.motivo?.trim() || null,
+    monto_centavos: d.montoCentavos,
+    usuario_pos_id: usuario,
+    creado_en: ahora,
+    actualizado_en: ahora,
+  });
+  return id;
+}
+
+export type MovimientoCaja = {
+  id: string;
+  tipo: TipoMovimiento;
+  motivo: string | null;
+  monto_centavos: number;
+  creado_en: string;
+};
+
+/** Movimientos del turno, para mostrarlos en el corte. */
+export async function movimientosDelTurno(cajaSesionId: string): Promise<MovimientoCaja[]> {
+  const db = await bd();
+  return db.getAllAsync<MovimientoCaja>(
+    `SELECT id, tipo, motivo, monto_centavos, creado_en
+       FROM movimientos_caja WHERE caja_sesion_id = ? ORDER BY creado_en DESC`,
+    [cajaSesionId]
+  );
+}
+
 export type Corte = {
   tickets: number;
   total_centavos: number;
   efectivo_centavos: number;
   tarjeta_centavos: number;
   fondo_centavos: number;
-  efectivo_esperado_centavos: number; // fondo + ventas en efectivo
+  /** Efectivo que ENTRÓ al cajón fuera de las ventas (cambio, depósitos). */
+  entradas_centavos: number;
+  /** Efectivo que SALIÓ del cajón (pago a proveedor, retiro, gastos). */
+  salidas_centavos: number;
+  /** fondo + ventas en efectivo + entradas − salidas */
+  efectivo_esperado_centavos: number;
 };
 
 /** Corte del turno: totales por método y efectivo esperado en cajón. */
@@ -119,13 +188,27 @@ export async function corteTurno(turno: Turno): Promise<Corte> {
   );
   const efectivo = porMetodo.find((x) => x.metodo === "efectivo")?.m ?? 0;
   const tarjeta = porMetodo.find((x) => x.metodo === "tarjeta")?.m ?? 0;
+
+  // Movimientos de efectivo del turno: sin esto, el corte no puede cuadrar
+  // cuando el dinero se movió por algo que no fue una venta.
+  const movs = await db.getAllAsync<{ tipo: string; m: number }>(
+    `SELECT tipo, COALESCE(SUM(monto_centavos),0) AS m
+       FROM movimientos_caja WHERE caja_sesion_id = ? GROUP BY tipo`,
+    [turno.id]
+  );
+  const entradas = movs.find((x) => x.tipo === "entrada")?.m ?? 0;
+  const salidas = movs.find((x) => x.tipo === "salida")?.m ?? 0;
+
   return {
     tickets: tot?.n ?? 0,
     total_centavos: tot?.t ?? 0,
     efectivo_centavos: efectivo,
     tarjeta_centavos: tarjeta,
     fondo_centavos: turno.fondo_inicial_centavos,
-    efectivo_esperado_centavos: turno.fondo_inicial_centavos + efectivo,
+    entradas_centavos: entradas,
+    salidas_centavos: salidas,
+    efectivo_esperado_centavos:
+      turno.fondo_inicial_centavos + efectivo + entradas - salidas,
   };
 }
 

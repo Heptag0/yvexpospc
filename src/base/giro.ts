@@ -12,6 +12,7 @@
 
 import { leerConfig, guardarConfig } from "./config";
 import type { IdUI } from "@/src/componentes/iconos";
+import { encolar } from "./sync";
 
 // Misión 4 de "Tu arranque", elegida por giro (todo se cumple 100% en
 // local, sin cuenta ni nube):
@@ -193,12 +194,27 @@ export async function guardarGiro(id: string): Promise<void> {
   await guardarConfig("giro", GIROS.some((g) => g.id === id) ? id : GIRO_DEFECTO);
 }
 
+const CLAVE_NEGOCIO = "negocio_nombre";
+/** Clave que usaba el móvil antes de unificar con el PC. Solo para migrar. */
+const CLAVE_NEGOCIO_VIEJA = "nombre_negocio";
+
 export async function leerNombreNegocio(): Promise<string> {
-  const v = await leerConfig("nombre_negocio");
-  return v && v.trim() ? v.trim() : "Mi negocio";
+  const v = await leerConfig(CLAVE_NEGOCIO);
+  if (v && v.trim()) return v;
+  // Migración de una sola vez: si todavía está en la clave vieja, se copia
+  // a la nueva y se sigue como si nada. Nadie pierde el nombre de su negocio.
+  const viejo = await leerConfig(CLAVE_NEGOCIO_VIEJA);
+  if (viejo && viejo.trim()) {
+    await guardarNombreNegocio(viejo);
+    return viejo;
+  }
+  return "";
 }
 
 export async function guardarNombreNegocio(nombre: string): Promise<void> {
   const limpio = nombre.trim();
-  await guardarConfig("nombre_negocio", limpio === "" ? "Mi negocio" : limpio);
+  await guardarConfig(CLAVE_NEGOCIO, limpio);
+  // Es config del NEGOCIO (no del teléfono), así que sí viaja a la nube.
+  await encolar("config", CLAVE_NEGOCIO, { clave: CLAVE_NEGOCIO, valor: limpio }, "update");
 }
+

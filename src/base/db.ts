@@ -11,7 +11,7 @@
 
 import * as SQLite from "expo-sqlite";
 
-const VERSION_ESQUEMA = 16;
+const VERSION_ESQUEMA = 20;
 const NOMBRE_BD = "yvexpos.db";
 
 let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -108,8 +108,22 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     }
   }
 
+  if (actual < 17) await db.execAsync(ESQUEMA_V17);
+  if (actual < 18) await db.execAsync(ESQUEMA_V18);
+  if (actual < 19) await db.execAsync(ESQUEMA_V19);
+  if (actual < 20) {
+    // v20 — Categoría de receta, para saber qué tan seguro es sugerir bajar
+    // un ingrediente sin arriesgar la conservación del producto.
+    try {
+      await db.execAsync(
+        "ALTER TABLE perfiles_etiqueta ADD COLUMN categoria_receta TEXT NOT NULL DEFAULT 'otro';"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
   if (actual < VERSION_ESQUEMA) {
-    await db.execAsync(`PRAGMA user_version = ${VERSION_ESQUEMA};`);
   }
 }
 
@@ -468,6 +482,147 @@ CREATE TABLE IF NOT EXISTS puntos_movimientos (
 CREATE INDEX IF NOT EXISTS idx_puntos_cliente ON puntos_movimientos(cliente_id);
 `;
 
+// v17 — Cotizaciones (LOCAL-ONLY por ahora, mismo punto de partida que
+// tuvieron proveedores/compras en v13 y clientes/lealtad en v14).
+//
+// cotizaciones: carrito armado SIN cobrar, con validez opcional. Si el
+//   cliente acepta, se convierte en una venta real (marcarConvertida enlaza
+//   venta_id) — nunca se borra la cotización al convertirla, es su rastro.
+// cotizacion_lineas: cada concepto, con su propio snapshot de descripción y
+//   precio (el precio COTIZADO se respeta al convertir, aunque el catálogo
+//   haya cambiado desde entonces — cotizar es prometer un precio).
+//
+// SYNC: NO se encola a cola_sync en v1 — mismo criterio que proveedores y
+// lealtad antes de sincronizarse.
+const ESQUEMA_V17 = `
+CREATE TABLE IF NOT EXISTS cotizaciones (
+  id                  TEXT PRIMARY KEY,
+  folio               INTEGER NOT NULL,
+  cliente_nombre      TEXT,
+  cliente_telefono    TEXT,
+  cliente_correo      TEXT,
+  notas               TEXT,
+  subtotal_centavos   INTEGER NOT NULL DEFAULT 0,
+  descuento_centavos  INTEGER NOT NULL DEFAULT 0,
+  total_centavos      INTEGER NOT NULL DEFAULT 0,
+  valida_hasta        TEXT,
+  estado              TEXT NOT NULL DEFAULT 'abierta',
+  venta_id            TEXT,
+  eliminado           INTEGER NOT NULL DEFAULT 0,
+  creado_en           TEXT NOT NULL,
+  actualizado_en      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cotizaciones_folio ON cotizaciones(folio);
+CREATE INDEX IF NOT EXISTS idx_cotizaciones_estado ON cotizaciones(estado);
+
+CREATE TABLE IF NOT EXISTS cotizacion_lineas (
+  id                        TEXT PRIMARY KEY,
+  cotizacion_id             TEXT NOT NULL REFERENCES cotizaciones(id),
+  producto_id               TEXT REFERENCES productos(id),
+  descripcion               TEXT NOT NULL,
+  cantidad                  REAL NOT NULL,
+  precio_unitario_centavos  INTEGER NOT NULL,
+  descuento_linea_centavos  INTEGER NOT NULL DEFAULT 0,
+  total_linea_centavos      INTEGER NOT NULL DEFAULT 0,
+  creado_en                 TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cotizacion_lineas_cot ON cotizacion_lineas(cotizacion_id);
+`;
+
+// v18 — Agenda financiera + el hueco de movimientos de caja.
+//
+// movimientos_caja: EL ARREGLO. Hasta ahora el corte hacía "fondo + ventas en
+//   efectivo" y ya — no había forma de registrar que salió dinero del cajón.
+//   Si el dueño le pagaba al proveedor con efectivo de la caja, el corte le
+//   decía que faltaban $500 sin manera de explicarlo. El PC sí lo tenía; el
+//   móvil se pone al parejo. El servidor YA conoce esta entidad (está en el
+//   MAPA de sync.py), así que sincroniza sola.
+//
+// gastos / ingresos: DOS LIBROS separados (negocio y personal). La misma
+//   categoría vive en los dos y está bien: la luz del local y la luz de la
+//   casa son el mismo tipo de gasto en dos bolsillos distintos.
+//
+// EL PUENTE: un gasto de categoría "retiro" en el negocio genera su ingreso
+//   espejo en el libro personal (ingreso_espejo_id / gasto_origen_id). Una
+//   captura, las dos verdades correctas.
+//
+// gastos_fijos: plantillas mensuales, para avisar antes de que venzan y para
+//   calcular cuánto cuesta el día/mes de arranque.
+// presupuestos: el límite por categoría. Sin un límite puesto por el dueño,
+//   cualquier aviso de "te estás pasando" sería una opinión, no un dato suyo.
+//
+// LOCAL-ONLY salvo movimientos_caja (que sí sincroniza, ver arriba).
+const ESQUEMA_V18 = `
+CREATE TABLE IF NOT EXISTS movimientos_caja (
+  id             TEXT PRIMARY KEY,
+  caja_sesion_id TEXT NOT NULL REFERENCES caja_sesiones(id),
+  tipo           TEXT NOT NULL,
+  motivo         TEXT,
+  monto_centavos INTEGER NOT NULL,
+  usuario_pos_id TEXT,
+  creado_en      TEXT NOT NULL,
+  actualizado_en TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mov_caja_sesion ON movimientos_caja(caja_sesion_id);
+
+CREATE TABLE IF NOT EXISTS gastos_fijos (
+  id             TEXT PRIMARY KEY,
+  ambito         TEXT NOT NULL DEFAULT 'negocio',
+  concepto       TEXT NOT NULL,
+  categoria      TEXT NOT NULL,
+  monto_centavos INTEGER NOT NULL,
+  dia_mes        INTEGER NOT NULL,
+  activo         INTEGER NOT NULL DEFAULT 1,
+  notas          TEXT,
+  eliminado      INTEGER NOT NULL DEFAULT 0,
+  creado_en      TEXT NOT NULL,
+  actualizado_en TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS gastos (
+  id                 TEXT PRIMARY KEY,
+  ambito             TEXT NOT NULL DEFAULT 'negocio',
+  concepto           TEXT NOT NULL,
+  categoria          TEXT NOT NULL,
+  monto_centavos     INTEGER NOT NULL,
+  fecha              TEXT NOT NULL,
+  metodo_pago        TEXT NOT NULL DEFAULT 'efectivo',
+  gasto_fijo_id      TEXT,
+  movimiento_caja_id TEXT,
+  ingreso_espejo_id  TEXT,
+  notas              TEXT,
+  eliminado          INTEGER NOT NULL DEFAULT 0,
+  creado_en          TEXT NOT NULL,
+  actualizado_en     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos(ambito, fecha);
+
+CREATE TABLE IF NOT EXISTS ingresos (
+  id              TEXT PRIMARY KEY,
+  ambito          TEXT NOT NULL DEFAULT 'personal',
+  concepto        TEXT NOT NULL,
+  categoria       TEXT NOT NULL,
+  monto_centavos  INTEGER NOT NULL,
+  fecha           TEXT NOT NULL,
+  gasto_origen_id TEXT,
+  notas           TEXT,
+  eliminado       INTEGER NOT NULL DEFAULT 0,
+  creado_en       TEXT NOT NULL,
+  actualizado_en  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ingresos_fecha ON ingresos(ambito, fecha);
+
+CREATE TABLE IF NOT EXISTS presupuestos (
+  id             TEXT PRIMARY KEY,
+  ambito         TEXT NOT NULL,
+  categoria      TEXT NOT NULL,
+  monto_centavos INTEGER NOT NULL,
+  creado_en      TEXT NOT NULL,
+  actualizado_en TEXT NOT NULL,
+  UNIQUE (ambito, categoria)
+);
+`;
+
 // ---------------------------------------------------------------------------
 // Utilidades
 // ---------------------------------------------------------------------------
@@ -500,3 +655,63 @@ export async function vaciarTodo(): Promise<void> {
     DELETE FROM categorias;
   `);
 }
+
+// v19 — Etiquetado frontal NOM-051.
+//
+// Para negocios que FABRICAN su propio producto y necesitan saber qué sellos
+// de advertencia le tocan antes de mandar a imprimir el empaque.
+//
+// Guarda TODO lo que necesita una etiqueta, no solo lo del cálculo: así la
+// pantalla puede ser una calculadora rápida para quien solo quiere saber, y
+// una herramienta completa para quien va a producir en serio.
+//
+// El CÁLCULO no vive aquí: está en src/base/sellos.ts, para que si cambia la
+// norma —y ya cambió de fecha dos veces— se actualice en un solo lugar y los
+// perfiles guardados se recalculen solos al abrirse.
+//
+// LOCAL-ONLY.
+const ESQUEMA_V19 = `
+CREATE TABLE IF NOT EXISTS perfiles_etiqueta (
+  id                 TEXT PRIMARY KEY,
+  nombre             TEXT NOT NULL,
+  tipo               TEXT NOT NULL DEFAULT 'solido',
+
+  calorias_kcal        REAL NOT NULL DEFAULT 0,
+  azucares_g           REAL NOT NULL DEFAULT 0,
+  grasas_saturadas_g   REAL NOT NULL DEFAULT 0,
+  grasas_trans_g       REAL NOT NULL DEFAULT 0,
+  sodio_mg             REAL NOT NULL DEFAULT 0,
+  proteinas_g          REAL NOT NULL DEFAULT 0,
+  carbohidratos_g      REAL NOT NULL DEFAULT 0,
+  grasas_totales_g     REAL NOT NULL DEFAULT 0,
+  fibra_g              REAL NOT NULL DEFAULT 0,
+
+  anade_azucares       INTEGER NOT NULL DEFAULT 0,
+  anade_grasas         INTEGER NOT NULL DEFAULT 0,
+  anade_sodio          INTEGER NOT NULL DEFAULT 0,
+  contiene_cafeina     INTEGER NOT NULL DEFAULT 0,
+  contiene_edulcorantes INTEGER NOT NULL DEFAULT 0,
+
+  exencion           TEXT NOT NULL DEFAULT 'ninguna',
+  area_cm2           REAL NOT NULL DEFAULT 0,
+
+  denominacion          TEXT,
+  marca                 TEXT,
+  ingredientes          TEXT,
+  alergenos             TEXT,
+  contenido_neto        TEXT,
+  porcion               TEXT,
+  porciones_envase      TEXT,
+  responsable_nombre    TEXT,
+  responsable_domicilio TEXT,
+  lote                  TEXT,
+  caducidad             TEXT,
+  conservacion          TEXT,
+  pais_origen           TEXT,
+  notas                 TEXT,
+
+  eliminado          INTEGER NOT NULL DEFAULT 0,
+  creado_en          TEXT NOT NULL,
+  actualizado_en     TEXT NOT NULL
+);
+`;

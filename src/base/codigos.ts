@@ -115,3 +115,67 @@ export async function consultarNombreUniversal(codigo: string): Promise<string |
     clearTimeout(timer);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Foto del catálogo universal — mismo origen que el nombre
+// ---------------------------------------------------------------------------
+
+export type FichaUniversal = {
+  nombre: string | null;
+  imagenUrl: string | null;
+};
+
+/** Consulta nombre E IMAGEN de un código en OpenFoodFacts, en UNA sola
+ *  petición. Antes se pedía solo el nombre; para un producto conocido
+ *  (un refresco, unas galletas de marca) es muy probable que la comunidad ya
+ *  haya subido su foto, y bajarla ahorra que el tendero fotografíe él mismo
+ *  cientos de productos que ya están fotografiados en internet.
+ *
+ *  Best-effort igual que el resto: sin internet o sin ficha, devuelve todo en
+ *  null y el flujo sigue idéntico.
+ *
+ *  ⚠️ Las imágenes de OpenFoodFacts son de la comunidad, bajo licencia
+ *  Creative Commons Attribution-ShareAlike. Para uso interno del POS (que el
+ *  tendero vea sus productos) no hay problema. Si algún día se publican en la
+ *  tienda en línea de cara al público, conviene revisar los términos de reuso.
+ */
+export async function consultarFichaUniversal(codigo: string): Promise<FichaUniversal> {
+  const vacia: FichaUniversal = { nombre: null, imagenUrl: null };
+  const c = normalizarCodigo(codigo);
+  if (!/^\d{8,14}$/.test(c)) return vacia;
+
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), TIMEOUT_UNIVERSAL_MS);
+  try {
+    const res = await fetch(
+      `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(c)}.json` +
+        `?fields=product_name,brands,quantity,image_front_url,image_url`,
+      {
+        headers: {
+          "User-Agent": "YvexPOS/1.0 (contacto: soporte@yvexiq.com)",
+          Accept: "application/json",
+        },
+        signal: ctrl.signal,
+      }
+    );
+    if (!res.ok) return vacia;
+    const datos: any = await res.json();
+    // OFF responde 200 aunque el producto no exista: lo que manda es `status`.
+    if (!datos || datos.status !== 1 || !datos.product) return vacia;
+
+    const p = datos.product;
+    const sanea = (v: any) => String(v ?? "").replace(/\s+/g, " ").trim();
+    const nombre = sanea(p.product_name)
+      ? simplificarNombreUniversal(p.product_name, p.brands, p.quantity)
+      : null;
+    // image_front_url es la foto del frente (la buena para un catálogo);
+    // image_url es la genérica, como respaldo.
+    const imagenUrl = p.image_front_url || p.image_url || null;
+
+    return { nombre, imagenUrl };
+  } catch {
+    return vacia;
+  } finally {
+    clearTimeout(timer);
+  }
+}

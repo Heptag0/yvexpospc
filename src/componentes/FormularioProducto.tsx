@@ -40,12 +40,15 @@ import {
 } from "@/src/base/inventario";
 import { aCentavos, centavosATexto, aNumero, pesos, fmtStock } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { elegirImagen, persistirImagen, borrarImagen } from "@/src/base/imagenes";
+import {
+  elegirImagen, persistirImagen, borrarImagen,
+  descargarImagen, quitarFondo, recorteDisponible,
+} from "@/src/base/imagenes";
 import ImagenProducto from "@/src/componentes/ImagenProducto";
 import { IconoUI } from "@/src/componentes/iconos";
 import { Boton, Banner, CabeceraModal, Campo, Insignia, useEstiloInput } from "@/src/componentes/ui";
 import EscanerCamara from "@/src/componentes/EscanerCamara";
-import { consultarNombreUniversal } from "@/src/base/codigos";
+import { consultarNombreUniversal, consultarFichaUniversal } from "@/src/base/codigos";
 
 type Props = {
   producto: Producto | null; // null = crear
@@ -86,12 +89,26 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [escanerAbierto, setEscanerAbierto] = useState(false);
   const [avisoEscaner, setAvisoEscaner] = useState("");
   const [buscandoNombre, setBuscandoNombre] = useState(false);
+  const [fotoSugerida, setFotoSugerida] = useState<string | null>(null);
+  const [buscandoFoto, setBuscandoFoto] = useState(false);
+  const [recortando, setRecortando] = useState(false);
+  const [hayRecorte, setHayRecorte] = useState(false);
+
+  // ¿El servidor puede quitar fondos? Se consulta al abrir, para no ofrecer
+  // un botón que va a fallar.
+  useEffect(() => {
+    let vivo = true;
+    recorteDisponible().then((v) => { if (vivo) setHayRecorte(v); });
+    return () => { vivo = false; };
+  }, []);
 
   /** El escáner rellena el campo de código. En un ALTA con nombre vacío,
    *  intentamos sugerir el nombre universal (best-effort, editable). */
   async function alEscanearCodigo(c: string) {
     setCodigo(c);
     setAvisoEscaner("");
+    
+    // 1. Buscar nombre (solo si es nuevo y no tiene nombre)
     if (!esEdicion && !nombre.trim()) {
       setBuscandoNombre(true);
       const sugerido = await consultarNombreUniversal(c);
@@ -102,6 +119,14 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
       } else {
         setAvisoEscaner("No encontramos el nombre de este código; escríbelo tú.");
       }
+    }
+    
+    // 2. Buscar foto (SIEMPRE, si no tiene imagen)
+    if (!imagenUri) {
+      setBuscandoFoto(true);
+      const ficha = await consultarFichaUniversal(c);
+      setBuscandoFoto(false);
+      if (ficha.imagenUrl) setFotoSugerida(ficha.imagenUrl);
     }
   }
 
@@ -193,6 +218,40 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   async function quitarFoto() {
     await borrarImagen(imagenUri);
     setImagenUri(null);
+  }
+
+  /** Adopta la foto que ofreció el catálogo universal. */
+  async function usarFotoSugerida() {
+    if (!fotoSugerida) return;
+    setError("");
+    setBuscandoFoto(true);
+    try {
+      const local = await descargarImagen(fotoSugerida);
+      await borrarImagen(imagenUri);
+      setImagenUri(local);
+      setFotoSugerida(null);
+    } catch (e: any) {
+      setError("No se pudo descargar la foto. Toma una tú.");
+    } finally {
+      setBuscandoFoto(false);
+    }
+  }
+
+  /** Quita el fondo de la foto actual, sea del catálogo o propia. */
+  async function recortarFondo() {
+    if (!imagenUri) return;
+    setError("");
+    setRecortando(true);
+    const r = await quitarFondo(imagenUri);
+    setRecortando(false);
+    if (r.ok) {
+      // La anterior se borra SOLO después de que el recorte salió bien.
+      const anterior = imagenUri;
+      setImagenUri(r.uri);
+      await borrarImagen(anterior);
+    } else {
+      setError(r.motivo);
+    }
   }
 
   async function guardar() {
@@ -308,6 +367,23 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
                 onCambio={(v) => setEsKit(v === "kit")}
               />
             </View>
+
+            {/* Foto que ofrece el catálogo abierto */}
+            {fotoSugerida && !imagenUri && (
+              <Pressable style={est.sugerenciaFoto} onPress={usarFotoSugerida} disabled={buscandoFoto}>
+                <Text style={est.sugerenciaFotoTxt}>
+                  {buscandoFoto ? "Descargando…" : "Encontramos una foto de este producto — tócala para usarla"}
+                </Text>
+              </Pressable>
+            )}
+
+            {/* Quitar fondo: sirve para la foto del catálogo y para la propia */}
+            {imagenUri && hayRecorte && (
+              <Pressable style={est.fotoBtn} onPress={recortarFondo} disabled={recortando}>
+                <IconoUI id="imagen" size={16} color={T.textoSuave} />
+                <Text style={est.fotoBtnTxt}>{recortando ? "Quitando fondo…" : "Quitar fondo"}</Text>
+              </Pressable>
+            )}
 
             <Campo label="Nombre">
               <TextInput
@@ -595,119 +671,135 @@ function Chip({
 
 function crearEstilos(T: Tema) {
   return StyleSheet.create({
-  raiz: { flex: 1, backgroundColor: T.fondo },
-  cuerpo: { padding: T.esp, paddingBottom: 60 },
-  fila: { flexDirection: "row", gap: 12 },
-  tipoFila: { marginBottom: 18 },
-  segmento: {
-    flexDirection: "row",
-    backgroundColor: T.superficie,
-    borderRadius: T.radioChico + 2,
-    borderWidth: 1,
-    borderColor: T.borde,
-    padding: 4,
-  },
-  segBtn: { flex: 1, paddingVertical: 10, borderRadius: T.radioChico - 2, alignItems: "center" },
-  segActivo: { backgroundColor: T.acento },
-  segTxt: { color: T.textoSuave, fontSize: 14, fontWeight: "600" },
-  segTxtActivo: { color: T.acentoTexto, fontWeight: "800" },
-  chips: { flexDirection: "row", gap: 8, paddingVertical: 2 },
-  chip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: T.borde,
-    backgroundColor: T.superficie2,
-  },
-  chipTxt: { color: T.textoSuave, fontSize: 14 },
-  switchFila: { flexDirection: "row", alignItems: "center", marginBottom: 18, gap: 12 },
-  switchLbl: { color: T.texto, fontSize: 15, fontWeight: "700" },
-  switchAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 2, paddingRight: 12 },
-  margenCaja: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    backgroundColor: T.superficie,
-    borderRadius: T.radioChico,
-    borderWidth: 1,
-    borderColor: T.borde,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    marginTop: -6,
-    marginBottom: 16,
-  },
-  margenLbl: { color: T.textoSuave, fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
-  margenVal: { fontSize: 18, fontWeight: "800" },
-  margenAviso: { color: T.peligro, fontSize: 12, flex: 1, textAlign: "right" },
-  kitCaja: {
-    backgroundColor: T.superficie,
-    borderRadius: T.radio,
-    borderWidth: 1,
-    borderColor: T.bordeFuerte,
-    padding: 14,
-    marginBottom: 18,
-  },
-  kitTitulo: { color: T.texto, fontSize: 15, fontWeight: "800" },
-  kitAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 3, marginBottom: 10 },
-  compFila: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 10,
-    paddingVertical: 9,
-    borderBottomWidth: 1,
-    borderBottomColor: T.borde,
-  },
-  compNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
-  compMeta: { color: T.textoTenue, fontSize: 11, marginTop: 1 },
-  compCant: {
-    backgroundColor: T.superficie2,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: T.borde,
-    color: T.texto,
-    width: 62,
-    textAlign: "center",
-    paddingVertical: 7,
-    fontSize: 15,
-  },
-  compQuitar: { color: T.peligro, fontSize: 16, fontWeight: "800", paddingHorizontal: 4 },
-  compResultado: {
-    backgroundColor: T.superficie2,
-    borderRadius: T.radioChico,
-    borderWidth: 1,
-    borderColor: T.borde,
-    padding: 11,
-    marginTop: 6,
-  },
-  compResNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
-  compResMeta: { color: T.textoTenue, fontSize: 12, marginTop: 1 },
-  kitCosto: { color: T.textoSuave, fontSize: 13, marginTop: 12 },
-  fotoZona: { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 },
-  fotoBotones: { flex: 1, gap: 8 },
-  fotoBtn: {
-    flexDirection: "row",
-    gap: 7,
-    backgroundColor: T.superficie2,
-    borderWidth: 1,
-    borderColor: T.bordeFuerte,
-    borderRadius: T.radioChico,
-    paddingVertical: 9,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  fotoBtnTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
-  codigoFila: { flexDirection: "row", alignItems: "center", gap: 9 },
-  scanBtn: {
-    width: 46,
-    height: 46,
-    borderRadius: T.radioChico + 2,
-    borderWidth: 1,
-    borderColor: T.bordeFuerte,
-    backgroundColor: T.superficie2,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avisoEscaner: { color: T.textoTenue, fontSize: 12, marginTop: 6, lineHeight: 17 },
+    raiz: { flex: 1, backgroundColor: T.fondo },
+    cuerpo: { padding: T.esp, paddingBottom: 60 },
+    fila: { flexDirection: "row", gap: 12 },
+    tipoFila: { marginBottom: 18 },
+    segmento: {
+      flexDirection: "row",
+      backgroundColor: T.superficie,
+      borderRadius: T.radioChico + 2,
+      borderWidth: 1,
+      borderColor: T.borde,
+      padding: 4,
+    },
+    segBtn: { flex: 1, paddingVertical: 10, borderRadius: T.radioChico - 2, alignItems: "center" },
+    segActivo: { backgroundColor: T.acento },
+    segTxt: { color: T.textoSuave, fontSize: 14, fontWeight: "600" },
+    segTxtActivo: { color: T.acentoTexto, fontWeight: "800" },
+    chips: { flexDirection: "row", gap: 8, paddingVertical: 2 },
+    chip: {
+      paddingHorizontal: 14,
+      paddingVertical: 8,
+      borderRadius: 20,
+      borderWidth: 1,
+      borderColor: T.borde,
+      backgroundColor: T.superficie2,
+    },
+    chipTxt: { color: T.textoSuave, fontSize: 14 },
+    switchFila: { flexDirection: "row", alignItems: "center", marginBottom: 18, gap: 12 },
+    switchLbl: { color: T.texto, fontSize: 15, fontWeight: "700" },
+    switchAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 2, paddingRight: 12 },
+    margenCaja: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      backgroundColor: T.superficie,
+      borderRadius: T.radioChico,
+      borderWidth: 1,
+      borderColor: T.borde,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+      marginTop: -6,
+      marginBottom: 16,
+    },
+    margenLbl: { color: T.textoSuave, fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
+    margenVal: { fontSize: 18, fontWeight: "800" },
+    margenAviso: { color: T.peligro, fontSize: 12, flex: 1, textAlign: "right" },
+    kitCaja: {
+      backgroundColor: T.superficie,
+      borderRadius: T.radio,
+      borderWidth: 1,
+      borderColor: T.bordeFuerte,
+      padding: 14,
+      marginBottom: 18,
+    },
+    kitTitulo: { color: T.texto, fontSize: 15, fontWeight: "800" },
+    kitAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 3, marginBottom: 10 },
+    compFila: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      paddingVertical: 9,
+      borderBottomWidth: 1,
+      borderBottomColor: T.borde,
+    },
+    compNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
+    compMeta: { color: T.textoTenue, fontSize: 11, marginTop: 1 },
+    compCant: {
+      backgroundColor: T.superficie2,
+      borderRadius: 8,
+      borderWidth: 1,
+      borderColor: T.borde,
+      color: T.texto,
+      width: 62,
+      textAlign: "center",
+      paddingVertical: 7,
+      fontSize: 15,
+    },
+    compQuitar: { color: T.peligro, fontSize: 16, fontWeight: "800", paddingHorizontal: 4 },
+    compResultado: {
+      backgroundColor: T.superficie2,
+      borderRadius: T.radioChico,
+      borderWidth: 1,
+      borderColor: T.borde,
+      padding: 11,
+      marginTop: 6,
+    },
+    compResNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
+    compResMeta: { color: T.textoTenue, fontSize: 12, marginTop: 1 },
+    kitCosto: { color: T.textoSuave, fontSize: 13, marginTop: 12 },
+    fotoZona: { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 },
+    fotoBotones: { flex: 1, gap: 8 },
+    fotoBtn: {
+      flexDirection: "row",
+      gap: 7,
+      backgroundColor: T.superficie2,
+      borderWidth: 1,
+      borderColor: T.bordeFuerte,
+      borderRadius: T.radioChico,
+      paddingVertical: 9,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    fotoBtnTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
+    codigoFila: { flexDirection: "row", alignItems: "center", gap: 9 },
+    scanBtn: {
+      width: 46,
+      height: 46,
+      borderRadius: T.radioChico + 2,
+      borderWidth: 1,
+      borderColor: T.bordeFuerte,
+      backgroundColor: T.superficie2,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    avisoEscaner: { color: T.textoTenue, fontSize: 12, marginTop: 6, lineHeight: 17 },
+    
+    // Nuevos estilos para la foto sugerida y quitar fondo
+    sugerenciaFoto: {
+      marginTop: 10,
+      padding: 11,
+      borderRadius: T.radio,
+      backgroundColor: T.acento + "14",
+      borderWidth: 1,
+      borderColor: T.acento + "55",
+    },
+    sugerenciaFotoTxt: {
+      color: T.acento,
+      fontSize: 12.5,
+      fontWeight: "600",
+      textAlign: "center",
+    },
   });
 }
