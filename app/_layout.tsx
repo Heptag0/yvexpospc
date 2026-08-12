@@ -13,8 +13,10 @@ import { Stack } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Text, View } from "react-native";
 import "react-native-reanimated";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { TemaProvider, useTema } from "@/src/componentes/TemaProvider";
 import { resolverEstadoInicial } from "@/src/base/modoUso";
+
 
 type EstadoInicial = "onboarding" | "app" | null;
 
@@ -116,10 +118,15 @@ function Contenido() {
   );
 }
 
+// El GestureHandlerRootView envuelve TODA la app: es requisito de
+// react-native-gesture-handler para que los gestos (pellizcar/arrastrar del
+// recortador de fotos, entre otros) funcionen en cualquier pantalla.
 export default function RootLayout() {
   return (
-    <TemaProvider>
-      <Contenido />
-    </TemaProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <TemaProvider>
+        <Contenido />
+      </TemaProvider>
+    </GestureHandlerRootView>
   );
 }

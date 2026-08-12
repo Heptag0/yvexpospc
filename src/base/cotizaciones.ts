@@ -7,12 +7,17 @@
 // Útil sobre todo en giros donde "cuánto me costaría" es el primer paso
 // natural (construcción, materiales, servicios), no solo abarrotes.
 //
-// LOCAL-ONLY por ahora — mismo punto de partida que tuvieron proveedores y
-// lealtad antes de sincronizarse.
+// SINCRONIZA (cotizaciones + cotizacion_lineas): mismo mecanismo que ventas
+// — encolar() sube, y la baja se aplica en sync.ts (ver ese archivo para el
+// lado que recibe cotizaciones de otras cajas). El folio es correlativo
+// LOCAL por dispositivo (puede repetirse entre cajas, igual que en ventas);
+// lo único que de verdad identifica una cotización entre dispositivos es su
+// id (UUID).
 //
 // Dinero SIEMPRE en centavos enteros. Soft delete vía `eliminado`.
 
 import { bd, uuid, ahoraISO } from "./db";
+import { encolar } from "./sync";
 
 export type LineaCotizacion = {
   id: string;
@@ -113,14 +118,32 @@ export async function crearCotizacion(d: DatosCotizacion): Promise<CotizacionCon
     const bruto = Math.round(l.precioUnitarioCentavos * l.cantidad);
     const descLinea = Math.max(0, l.descuentoLineaCentavos ?? 0);
     const totalLinea = Math.max(0, bruto - descLinea);
+    const lineaId = uuid();
     await db.runAsync(
       `INSERT INTO cotizacion_lineas
          (id, cotizacion_id, producto_id, descripcion, cantidad,
           precio_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
        VALUES (?,?,?,?,?,?,?,?,?)`,
-      [uuid(), id, l.productoId || null, l.descripcion.trim(), l.cantidad, l.precioUnitarioCentavos, descLinea, totalLinea, ts]
+      [lineaId, id, l.productoId || null, l.descripcion.trim(), l.cantidad, l.precioUnitarioCentavos, descLinea, totalLinea, ts]
     );
+    await encolar("cotizacion_lineas", lineaId, {
+      id: lineaId, cotizacion_id: id, producto_id: l.productoId || null,
+      descripcion: l.descripcion.trim(), cantidad: l.cantidad,
+      precio_unitario_centavos: l.precioUnitarioCentavos, descuento_linea_centavos: descLinea,
+      total_linea_centavos: totalLinea, creado_en: ts,
+    });
   }
+
+  await encolar("cotizaciones", id, {
+    id, folio,
+    cliente_nombre: d.clienteNombre?.trim() || null,
+    cliente_telefono: d.clienteTelefono?.trim() || null,
+    cliente_correo: d.clienteCorreo?.trim() || null,
+    notas: d.notas?.trim() || null,
+    subtotal_centavos: subtotal, descuento_centavos: descuento, total_centavos: total,
+    valida_hasta: d.validaHasta || null, estado: "abierta", venta_id: null,
+    eliminado: 0, creado_en: ts, actualizado_en: ts,
+  });
 
   const creada = await obtenerCotizacion(id);
   if (!creada) throw new Error("No se pudo leer la cotización recién creada.");
@@ -171,19 +194,23 @@ export async function obtenerCotizacion(id: string): Promise<CotizacionConLineas
 
 export async function cancelarCotizacion(id: string): Promise<void> {
   const db = await bd();
+  const ts = ahoraISO();
   const r = await db.runAsync(
     "UPDATE cotizaciones SET estado = 'cancelada', actualizado_en = ? WHERE id = ? AND eliminado = 0 AND estado = 'abierta'",
-    [ahoraISO(), id]
+    [ts, id]
   );
   if (r.changes === 0) throw new Error("Solo se pueden cancelar cotizaciones abiertas.");
+  await encolar("cotizaciones", id, { id, estado: "cancelada", actualizado_en: ts }, "update");
 }
 
 export async function eliminarCotizacion(id: string): Promise<void> {
   const db = await bd();
+  const ts = ahoraISO();
   await db.runAsync(
     "UPDATE cotizaciones SET eliminado = 1, actualizado_en = ? WHERE id = ?",
-    [ahoraISO(), id]
+    [ts, id]
   );
+  await encolar("cotizaciones", id, { id, eliminado: 1, actualizado_en: ts }, "update");
 }
 
 /** Marca como vencidas las abiertas cuya validez ya pasó. Barato: se llama
@@ -214,13 +241,15 @@ export async function prepararParaVenta(id: string): Promise<CotizacionConLineas
 
 export async function marcarConvertida(id: string, ventaId: string): Promise<void> {
   const db = await bd();
+  const ts = ahoraISO();
   const r = await db.runAsync(
     "UPDATE cotizaciones SET estado = 'convertida', venta_id = ?, actualizado_en = ? WHERE id = ? AND estado = 'abierta'",
-    [ventaId, ahoraISO(), id]
+    [ventaId, ts, id]
   );
   if (r.changes === 0) {
     throw new Error("La cotización ya no estaba abierta (¿se convirtió desde otro dispositivo?).");
   }
+  await encolar("cotizaciones", id, { id, estado: "convertida", venta_id: ventaId, actualizado_en: ts }, "update");
 }
 
 // ---------------------------------------------------------------------------
@@ -264,4 +293,4 @@ export function textoCotizacion(c: CotizacionConLineas, nombreNegocio: string): 
   r.push("=".repeat(ANCHO));
   r.push(centro("Hecho con YvexPOS"));
   return r.join("\n");
-}
+} 

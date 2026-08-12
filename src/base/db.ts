@@ -11,7 +11,7 @@
 
 import * as SQLite from "expo-sqlite";
 
-const VERSION_ESQUEMA = 20;
+const VERSION_ESQUEMA = 22;
 const NOMBRE_BD = "yvexpos.db";
 
 let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -117,6 +117,37 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     try {
       await db.execAsync(
         "ALTER TABLE perfiles_etiqueta ADD COLUMN categoria_receta TEXT NOT NULL DEFAULT 'otro';"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
+  if (actual < 21) {
+    // v21 — Favorito: el móvil se pone al parejo del PC, que ya marca
+    // productos favoritos (se ven con ★ en la lista de inventario del PC).
+    // Mismo patrón try/catch que las columnas anteriores: si ya existía
+    // (reinstalación con user_version atrasado), seguimos sin tronar.
+    try {
+      await db.execAsync(
+        "ALTER TABLE productos ADD COLUMN favorito INTEGER NOT NULL DEFAULT 0;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
+  if (actual < 22) {
+    // v22 — Costo histórico en venta_lineas (misma migración 004 del PC).
+    // Sin esto, "cuánto gané" en una venta pasada se recalculaba con el
+    // costo ACTUAL del producto, así que la ganancia de una venta de hace
+    // un mes cambiaba sola cada vez que el costo del producto cambiaba.
+    // Ventas previas a esta migración quedan en 0 ("sin costo registrado"),
+    // igual que en el PC — no se inventa un costo histórico que no se
+    // guardó.
+    try {
+      await db.execAsync(
+        "ALTER TABLE venta_lineas ADD COLUMN costo_unitario_centavos INTEGER NOT NULL DEFAULT 0;"
       );
     } catch {
       // La columna ya existía: no pasa nada, seguimos.

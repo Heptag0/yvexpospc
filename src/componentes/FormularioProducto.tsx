@@ -24,14 +24,16 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { BlurView } from "expo-blur";
+import * as Haptics from "expo-haptics";
 import {
   Producto,
   Categoria,
   ComponenteKit,
   DatosProducto,
-  UNIDADES,
   crearProducto,
   editarProducto,
   eliminarProducto,
@@ -41,10 +43,12 @@ import {
 import { aCentavos, centavosATexto, aNumero, pesos, fmtStock } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import {
-  elegirImagen, persistirImagen, borrarImagen,
+  elegirImagen, borrarImagen,
   descargarImagen, quitarFondo, recorteDisponible,
+  persistirRecorteConOriginal, originalDe,
 } from "@/src/base/imagenes";
 import ImagenProducto from "@/src/componentes/ImagenProducto";
+import RecortadorFoto from "@/src/componentes/RecortadorFoto";
 import { IconoUI } from "@/src/componentes/iconos";
 import { Boton, Banner, CabeceraModal, Campo, Insignia, useEstiloInput } from "@/src/componentes/ui";
 import EscanerCamara from "@/src/componentes/EscanerCamara";
@@ -64,14 +68,43 @@ type CompLocal = { producto_id: string; nombre: string; cantidad: string; costo_
 
 type Tema = ReturnType<typeof useTema>["tema"];
 
+/** "¿Cómo se vende?" — mismo criterio que el PC (src/vistas/inventario.js):
+ *  pieza = piezas enteras · granel = peso/volumen con báscula (kg o litro,
+ *  con decimales) · kit = paquete que agrupa otros productos. Reemplaza el
+ *  viejo selector "Producto/Kit" + el dropdown suelto de unidad. */
+type ModoVenta = "pieza" | "granel" | "kit";
+
+/** Deriva el modo inicial de un producto existente, igual que aplicarModo()
+ *  hace en el PC: kit si es_kit, granel si su unidad ya es kg/litro, pieza
+ *  en cualquier otro caso (incluye unidades viejas ya retiradas: g, ml,
+ *  caja, paquete, metro — se re-clasifican como pieza al guardar). */
+function modoVentaInicial(p: Producto | null): ModoVenta {
+  if (!p) return "pieza";
+  if (p.es_kit === 1) return "kit";
+  if (p.unidad === "kg" || p.unidad === "litro") return "granel";
+  return "pieza";
+}
+
 export default function FormularioProducto({ producto, categorias, onCerrar, onGuardado, prellenado }: Props) {
   const { tema: T } = useTema();
   const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
   const esEdicion = !!producto;
 
-  const [esKit, setEsKit] = useState(producto ? producto.es_kit === 1 : false);
+  const [modoVenta, setModoVenta] = useState<ModoVenta>(modoVentaInicial(producto));
+  const [unidadGranel, setUnidadGranel] = useState<"kg" | "litro">(
+    producto?.unidad === "litro" ? "litro" : "kg"
+  );
+  // esKit y unidad se DERIVAN de modoVenta (nunca se editan directo), así
+  // nunca quedan desincronizados entre sí.
+  const esKit = modoVenta === "kit";
+  const unidad = modoVenta === "granel" ? unidadGranel : "pieza";
+
   const [nombre, setNombre] = useState(producto?.nombre ?? prellenado?.nombre ?? "");
+  // ¿El nombre actual es una sugerencia sin confirmar (del catálogo
+  // universal) o algo que el tendero escribió a mano? Solo lo primero se
+  // reemplaza solo al re-escanear un código distinto.
+  const [nombreEsSugerido, setNombreEsSugerido] = useState(!esEdicion && !!prellenado?.nombre);
   const [codigo, setCodigo] = useState(producto?.codigo_barras ?? prellenado?.codigo ?? "");
   const [categoriaId, setCategoriaId] = useState<string | null>(producto?.categoria_id ?? null);
   const [precio, setPrecio] = useState(producto ? centavosATexto(producto.precio_venta_centavos) : "");
@@ -80,7 +113,7 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [controlaStock, setControlaStock] = useState(producto ? producto.controla_stock === 1 : true);
   const [stock, setStock] = useState(String(producto?.stock ?? 0));
   const [stockMin, setStockMin] = useState(String(producto?.stock_minimo ?? 0));
-  const [unidad, setUnidad] = useState(producto?.unidad ?? "pieza");
+  const [favorito, setFavorito] = useState(producto?.favorito === 1);
   const [imagenUri, setImagenUri] = useState<string | null>(producto?.imagen_uri ?? null);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
@@ -93,6 +126,20 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [buscandoFoto, setBuscandoFoto] = useState(false);
   const [recortando, setRecortando] = useState(false);
   const [hayRecorte, setHayRecorte] = useState(false);
+  // ¿La foto actual vino del catálogo abierto? Sirve para el aviso de
+  // calidad (cerrable) y para saber si dejar de mostrarlo al cambiar de foto.
+  const [fotoEsSugerida, setFotoEsSugerida] = useState(false);
+  const [avisoFotoVisible, setAvisoFotoVisible] = useState(false);
+  // Vista grande al mantener pulsada la foto (con el formulario difuminado
+  // detrás) + acciones rápidas (cámara/galería/quitar fondo/ajustar) sin cerrarla.
+  const [lightboxAbierto, setLightboxAbierto] = useState(false);
+  // Recortador con pellizco/arrastre: reemplaza el recorte destructivo del
+  // picker nativo. ajusteEsNuevo distingue "foto recién elegida/descargada,
+  // sin persistir todavía" de "re-ajustar la foto que ya estaba puesta"
+  // (para saber qué limpiar si se cancela o se confirma).
+  const [ajustarAbierto, setAjustarAbierto] = useState(false);
+  const [ajusteUri, setAjusteUri] = useState<string | null>(null);
+  const [ajusteEsNuevo, setAjusteEsNuevo] = useState(false);
 
   // ¿El servidor puede quitar fondos? Se consulta al abrir, para no ofrecer
   // un botón que va a fallar.
@@ -102,31 +149,46 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
     return () => { vivo = false; };
   }, []);
 
-  /** El escáner rellena el campo de código. En un ALTA con nombre vacío,
-   *  intentamos sugerir el nombre universal (best-effort, editable). */
+  /** El escáner rellena el campo de código. Si el nombre está vacío o es
+   *  una sugerencia sin confirmar (de OTRO código), intentamos el nombre
+   *  universal. Con try/catch: si la consulta falla, se avisa en vez de
+   *  quedarse a medias en silencio (y sin trabar la búsqueda de la foto). */
   async function alEscanearCodigo(c: string) {
     setCodigo(c);
     setAvisoEscaner("");
-    
-    // 1. Buscar nombre (solo si es nuevo y no tiene nombre)
-    if (!esEdicion && !nombre.trim()) {
+
+    if (!nombre.trim() || nombreEsSugerido) {
       setBuscandoNombre(true);
-      const sugerido = await consultarNombreUniversal(c);
-      setBuscandoNombre(false);
-      if (sugerido) {
-        setNombre(sugerido);
-        setAvisoEscaner("Sugerimos el nombre desde el catálogo universal; revísalo antes de guardar.");
-      } else {
-        setAvisoEscaner("No encontramos el nombre de este código; escríbelo tú.");
+      try {
+        const sugerido = await consultarNombreUniversal(c);
+        if (sugerido) {
+          setNombre(sugerido);
+          setNombreEsSugerido(true);
+          setAvisoEscaner("Sugerimos el nombre desde el catálogo universal; revísalo antes de guardar.");
+        } else {
+          // El nombre que había era de OTRO código: ya no aplica aquí.
+          if (nombreEsSugerido) setNombre("");
+          setNombreEsSugerido(false);
+          setAvisoEscaner("No encontramos el nombre de este código; escríbelo tú.");
+        }
+      } catch {
+        setAvisoEscaner("No se pudo consultar el catálogo universal; escríbelo tú.");
+      } finally {
+        setBuscandoNombre(false);
       }
     }
-    
-    // 2. Buscar foto (SIEMPRE, si no tiene imagen)
+
+    // Foto (igual que antes): solo si aún no hay una foto propia.
     if (!imagenUri) {
       setBuscandoFoto(true);
-      const ficha = await consultarFichaUniversal(c);
-      setBuscandoFoto(false);
-      if (ficha.imagenUrl) setFotoSugerida(ficha.imagenUrl);
+      try {
+        const ficha = await consultarFichaUniversal(c);
+        if (ficha.imagenUrl) setFotoSugerida(ficha.imagenUrl);
+      } catch {
+        // Silencioso: la foto es un plus, no debe bloquear el alta.
+      } finally {
+        setBuscandoFoto(false);
+      }
     }
   }
 
@@ -207,9 +269,13 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
     try {
       const tmp = await elegirImagen(desde);
       if (!tmp) return; // canceló
-      const final = await persistirImagen(tmp);
-      await borrarImagen(imagenUri); // la anterior, si era nuestra
-      setImagenUri(final);
+      // Ya no se persiste directo: primero pasa por el recortador, para
+      // que el tendero encuadre a su gusto (el picker ya no recorta solo).
+      setAjusteUri(tmp);
+      setAjusteEsNuevo(true);
+      setFotoEsSugerida(false);
+      setAvisoFotoVisible(false);
+      setAjustarAbierto(true);
     } catch (e: any) {
       setError(e?.message ?? String(e));
     }
@@ -218,23 +284,84 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   async function quitarFoto() {
     await borrarImagen(imagenUri);
     setImagenUri(null);
+    setFotoEsSugerida(false);
+    setAvisoFotoVisible(false);
   }
 
-  /** Adopta la foto que ofreció el catálogo universal. */
+  /** Abre el recortador para reencuadrar la foto que YA está puesta.
+   *  Usa la foto COMPLETA original si se conserva (así se puede alejar y
+   *  recuperar lo que quedó fuera del recorte anterior); si no existe
+   *  —fotos guardadas antes de esta versión— cae al recorte, que es lo
+   *  único disponible. */
+  async function abrirAjustarActual() {
+    if (!imagenUri) return;
+    const original = await originalDe(imagenUri);
+    setAjusteUri(original ?? imagenUri);
+    setAjusteEsNuevo(false);
+    setAjustarAbierto(true);
+  }
+
+  function cancelarAjuste() {
+    // Si era una foto nueva sin usar todavía (recién elegida/descargada),
+    // se borra para no dejar huérfanos; si era la que ya estaba puesta (o
+    // su original conservada), no se toca.
+    if (ajusteEsNuevo && ajusteUri) void borrarImagen(ajusteUri);
+    setAjustarAbierto(false);
+    setAjusteUri(null);
+  }
+
+  async function alConfirmarRecorte(uriRecortada: string, uriOriginal: string) {
+    setError("");
+    try {
+      // Se guardan EMPAREJADAS: el recorte (lo que se ve en el producto) y
+      // la foto completa de la que salió, para poder reajustar el encuadre
+      // más adelante sin haber perdido lo que quedó fuera.
+      const final = await persistirRecorteConOriginal(uriRecortada, uriOriginal);
+      await borrarImagen(imagenUri); // la foto anterior y su original, si eran nuestras
+      if (ajusteEsNuevo && ajusteUri) await borrarImagen(ajusteUri); // el temporal sin recortar
+      setImagenUri(final);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setAjustarAbierto(false);
+      setAjusteUri(null);
+    }
+  }
+
+  /** Descarga la foto que ofreció el catálogo universal y abre el
+   *  recortador (nunca viene recortada de OFF: aquí es donde el tendero
+   *  decide el encuadre, con toda la foto disponible). */
   async function usarFotoSugerida() {
     if (!fotoSugerida) return;
     setError("");
     setBuscandoFoto(true);
     try {
       const local = await descargarImagen(fotoSugerida);
-      await borrarImagen(imagenUri);
-      setImagenUri(local);
       setFotoSugerida(null);
+      setAjusteUri(local);
+      setAjusteEsNuevo(true);
+      setFotoEsSugerida(true);
+      setAvisoFotoVisible(true);
+      setAjustarAbierto(true);
     } catch (e: any) {
       setError("No se pudo descargar la foto. Toma una tú.");
     } finally {
       setBuscandoFoto(false);
     }
+  }
+
+  /** Vista grande de la foto (mantener pulsada). No-op sin foto. */
+  function abrirLightbox() {
+    if (!imagenUri) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light).catch(() => {});
+    setLightboxAbierto(true);
+  }
+
+  /** Cierra el lightbox y luego ejecuta la acción (cámara/galería/recorte),
+   *  para que el resultado y sus mensajes se vean en el formulario normal. */
+  function accionDesdeLightbox(fn: () => void) {
+    setLightboxAbierto(false);
+    fn();
   }
 
   /** Quita el fondo de la foto actual, sea del catálogo o propia. */
@@ -269,6 +396,7 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
       stock_minimo: aNumero(stockMin),
       unidad,
       es_kit: esKit,
+      favorito,
       imagen_uri: imagenUri,
       componentes: componentes.map((c) => ({
         producto_id: c.producto_id,
@@ -329,16 +457,18 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
           <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
             <Banner texto={error} tipo="error" />
 
-            {/* Foto del producto */}
+            {/* Foto del producto — mantener pulsada para verla en grande */}
             <View style={est.fotoZona}>
-              <ImagenProducto
-                uri={imagenUri}
-                nombre={nombre || "?"}
-                color={categorias.find((c) => c.id === categoriaId)?.color}
-                icono={categorias.find((c) => c.id === categoriaId)?.icono}
-                size={104}
-                radio={18}
-              />
+              <Pressable onLongPress={abrirLightbox} delayLongPress={280}>
+                <ImagenProducto
+                  uri={imagenUri}
+                  nombre={nombre || "?"}
+                  color={categorias.find((c) => c.id === categoriaId)?.color}
+                  icono={categorias.find((c) => c.id === categoriaId)?.icono}
+                  size={104}
+                  radio={18}
+                />
+              </Pressable>
               <View style={est.fotoBotones}>
                 <Pressable style={est.fotoBtn} onPress={() => cambiarFoto("camara")}>
                   <IconoUI id="camara" size={16} color={T.textoSuave} />
@@ -356,16 +486,42 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
               </View>
             </View>
 
-            {/* Tipo: producto normal o kit */}
+            {/* ¿Cómo se vende? — mismo criterio que el PC */}
             <View style={est.tipoFila}>
               <Segmento
                 opciones={[
-                  { id: "producto", label: "Producto" },
-                  { id: "kit", label: "Kit / Paquete" },
+                  { id: "pieza", label: "Pieza" },
+                  { id: "granel", label: "A granel" },
+                  { id: "kit", label: "Paquete" },
                 ]}
-                valor={esKit ? "kit" : "producto"}
-                onCambio={(v) => setEsKit(v === "kit")}
+                valor={modoVenta}
+                onCambio={(v) => setModoVenta(v as ModoVenta)}
               />
+              <Text style={est.modoVentaTip}>
+                {modoVenta === "pieza"
+                  ? "Se vende por piezas enteras: refrescos, cigarros, dulces."
+                  : modoVenta === "granel"
+                  ? "Se vende por peso o volumen con decimales, usando báscula: fruta, verdura, carnes."
+                  : "Un paquete que agrupa otros productos y descuenta sus componentes del inventario al venderse."}
+              </Text>
+              {modoVenta === "granel" && (
+                <View style={{ marginTop: 10 }}>
+                  <Campo label="Unidad de granel">
+                    <View style={est.chips}>
+                      <Chip
+                        activo={unidadGranel === "kg"}
+                        label="Kilogramo"
+                        onPress={() => setUnidadGranel("kg")}
+                      />
+                      <Chip
+                        activo={unidadGranel === "litro"}
+                        label="Litro"
+                        onPress={() => setUnidadGranel("litro")}
+                      />
+                    </View>
+                  </Campo>
+                </View>
+              )}
             </View>
 
             {/* Foto que ofrece el catálogo abierto */}
@@ -375,6 +531,24 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
                   {buscandoFoto ? "Descargando…" : "Encontramos una foto de este producto — tócala para usarla"}
                 </Text>
               </Pressable>
+            )}
+
+            {/* Aviso de calidad: la foto viene de un catálogo abierto, cerrable */}
+            {avisoFotoVisible && imagenUri && (
+              <View style={est.avisoFoto}>
+                <Text style={est.avisoFotoTxt}>
+                  Esta foto viene de un catálogo abierto — la calidad varía
+                  según quién la subió. Si no se ve bien, tómala tú o usa
+                  "Quitar fondo".
+                </Text>
+                <Pressable
+                  onPress={() => setAvisoFotoVisible(false)}
+                  hitSlop={10}
+                  style={est.avisoFotoCerrar}
+                >
+                  <Text style={est.avisoFotoCerrarTxt}>✕</Text>
+                </Pressable>
+              </View>
             )}
 
             {/* Quitar fondo: sirve para la foto del catálogo y para la propia */}
@@ -389,7 +563,11 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
               <TextInput
                 style={estiloInput}
                 value={nombre}
-                onChangeText={setNombre}
+                onChangeText={(t) => {
+                  setNombre(t);
+                  // Ya es texto del tendero: un re-escaneo no lo debe pisar.
+                  setNombreEsSugerido(false);
+                }}
                 placeholder={esKit ? "Ej. Six Corona 355ml" : "Ej. Coca-Cola 600ml"}
                 placeholderTextColor={T.textoTenue}
               />
@@ -439,6 +617,21 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
                 </View>
               </ScrollView>
             </Campo>
+
+            <View style={est.switchFila}>
+              <View style={{ flex: 1 }}>
+                <Text style={est.switchLbl}>Favorito ★</Text>
+                <Text style={est.switchAyuda}>
+                  Aparece primero en la cuadrícula rápida de Vender.
+                </Text>
+              </View>
+              <Switch
+                value={favorito}
+                onValueChange={setFavorito}
+                trackColor={{ true: T.acento, false: T.borde }}
+                thumbColor="#fff"
+              />
+            </View>
 
             {/* ---------- MODO KIT: armador de componentes ---------- */}
             {esKit && (
@@ -583,16 +776,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
               </>
             )}
 
-            <Campo label="Unidad">
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
-                <View style={est.chips}>
-                  {UNIDADES.map((u) => (
-                    <Chip key={u} activo={unidad === u} label={u} onPress={() => setUnidad(u)} />
-                  ))}
-                </View>
-              </ScrollView>
-            </Campo>
-
             {esEdicion && (
               <View style={{ marginTop: 12 }}>
                 <Boton titulo="Eliminar producto" tipo="peligro" onPress={confirmarBorrado} />
@@ -609,6 +792,80 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
             onCodigo={(c) => void alEscanearCodigo(c)}
             onCerrar={() => setEscanerAbierto(false)}
           />
+        )}
+
+        {/* Vista grande de la foto (mantener pulsada): el formulario queda
+            difuminado detrás. Desde aquí también se puede cambiar o
+            recortar el fondo sin tener que cerrarla primero.
+            NOTA: es un overlay absoluto, no un <Modal> anidado — un Modal
+            dentro de otro Modal no siempre cubre toda la pantalla. */}
+        {lightboxAbierto && imagenUri && (
+          <View style={est.lightboxOverlayRoot}>
+            <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+            <View style={[StyleSheet.absoluteFill, est.lightboxOscurecer]} />
+            <Pressable
+              style={StyleSheet.absoluteFill}
+              onPress={() => setLightboxAbierto(false)}
+            />
+            <View style={est.lightboxImagenWrap} pointerEvents="box-none">
+              <Image
+                source={{ uri: imagenUri }}
+                style={est.lightboxImagen}
+                resizeMode="contain"
+              />
+            </View>
+            <View style={est.lightboxAcciones}>
+              <Pressable
+                style={est.lightboxBtn}
+                onPress={() => accionDesdeLightbox(() => void abrirAjustarActual())}
+              >
+                <IconoUI id="imagen" size={17} color="#fff" />
+                <Text style={est.lightboxBtnTxt}>Ajustar</Text>
+              </Pressable>
+              <Pressable
+                style={est.lightboxBtn}
+                onPress={() => accionDesdeLightbox(() => cambiarFoto("camara"))}
+              >
+                <IconoUI id="camara" size={17} color="#fff" />
+                <Text style={est.lightboxBtnTxt}>Cámara</Text>
+              </Pressable>
+              <Pressable
+                style={est.lightboxBtn}
+                onPress={() => accionDesdeLightbox(() => cambiarFoto("galeria"))}
+              >
+                <IconoUI id="imagen" size={17} color="#fff" />
+                <Text style={est.lightboxBtnTxt}>Galería</Text>
+              </Pressable>
+              {hayRecorte && (
+                <Pressable
+                  style={est.lightboxBtn}
+                  onPress={() => accionDesdeLightbox(() => void recortarFondo())}
+                >
+                  <IconoUI id="imagen" size={17} color="#fff" />
+                  <Text style={est.lightboxBtnTxt}>Quitar fondo</Text>
+                </Pressable>
+              )}
+            </View>
+            <Pressable
+              style={est.lightboxCerrar}
+              onPress={() => setLightboxAbierto(false)}
+              hitSlop={10}
+            >
+              <Text style={est.lightboxCerrarTxt}>✕</Text>
+            </Pressable>
+          </View>
+        )}
+
+        {/* Recortador con pellizco/arrastre: mismo patrón de overlay
+            absoluto que el lightbox (no un <Modal> anidado). */}
+        {ajustarAbierto && ajusteUri && (
+          <View style={est.lightboxOverlayRoot}>
+            <RecortadorFoto
+              uri={ajusteUri}
+              onCancelar={cancelarAjuste}
+              onListo={(u, orig) => void alConfirmarRecorte(u, orig)}
+            />
+          </View>
         )}
       </SafeAreaView>
     </Modal>
@@ -801,5 +1058,93 @@ function crearEstilos(T: Tema) {
       fontWeight: "600",
       textAlign: "center",
     },
+
+    // "¿Cómo se vende?" — texto de ayuda bajo el selector.
+    modoVentaTip: {
+      color: T.textoTenue,
+      fontSize: 12,
+      marginTop: 8,
+      lineHeight: 17,
+    },
+
+    // Aviso de calidad de la foto del catálogo abierto (cerrable, discreto).
+    avisoFoto: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 10,
+      marginTop: 10,
+      padding: 11,
+      borderRadius: T.radio,
+      backgroundColor: T.superficie2,
+      borderWidth: 1,
+      borderColor: T.borde,
+    },
+    avisoFotoTxt: {
+      flex: 1,
+      color: T.textoSuave,
+      fontSize: 12,
+      lineHeight: 17,
+    },
+    avisoFotoCerrar: {
+      width: 24,
+      height: 24,
+      borderRadius: 12,
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    avisoFotoCerrarTxt: { color: T.textoTenue, fontSize: 14, fontWeight: "700" },
+
+    // Lightbox de la foto (mantener pulsada): overlay absoluto de pantalla
+    // completa (NO un <Modal> anidado — ver nota en el JSX) con BlurView
+    // real detrás + un oscurecido sutil encima para contraste de texto.
+    lightboxOverlayRoot: {
+      position: "absolute",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      alignItems: "center",
+      justifyContent: "center",
+      zIndex: 50,
+      elevation: 50,
+    },
+    lightboxOscurecer: { backgroundColor: "#00000026" },
+    lightboxImagenWrap: {
+      width: "86%",
+      height: "58%",
+    },
+    lightboxImagen: { width: "100%", height: "100%" },
+    lightboxAcciones: {
+      flexDirection: "row",
+      flexWrap: "wrap",
+      justifyContent: "center",
+      gap: 10,
+      marginTop: 26,
+      paddingHorizontal: 20,
+    },
+    lightboxBtn: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: 7,
+      backgroundColor: "#ffffff26",
+      borderWidth: 1,
+      borderColor: "#ffffff44",
+      borderRadius: T.radioChico + 2,
+      paddingHorizontal: 14,
+      paddingVertical: 10,
+    },
+    lightboxBtnTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
+    lightboxCerrar: {
+      position: "absolute",
+      top: 54,
+      right: 22,
+      width: 36,
+      height: 36,
+      borderRadius: 18,
+      backgroundColor: "#ffffff26",
+      alignItems: "center",
+      justifyContent: "center",
+    },
+    lightboxCerrarTxt: { color: "#fff", fontSize: 16, fontWeight: "800" },
   });
 }

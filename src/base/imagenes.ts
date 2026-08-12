@@ -16,15 +16,19 @@ async function asegurarCarpeta(): Promise<void> {
   );
 }
 
-/** Abre cámara o galería (cuadrada, comprimida). Devuelve uri temporal o null. */
+/** Abre cámara o galería. Ya NO recorta aquí (antes usaba allowsEditing +
+ *  aspect [1,1], que es un recorte DESTRUCTIVO del picker nativo — el
+ *  sistema operativo lo aplica antes de que la app vea la foto, y lo que
+ *  queda fuera del recuadro se pierde para siempre). Ahora se pide la foto
+ *  completa y el encuadre a cuadro se hace después, en RecortadorFoto.tsx,
+ *  donde el tendero puede mover y acercar/alejar con libertad. Devuelve
+ *  uri temporal o null. */
 export async function elegirImagen(
   desde: "camara" | "galeria"
 ): Promise<string | null> {
   const opciones: ImagePicker.ImagePickerOptions = {
     mediaTypes: ["images"],
-    allowsEditing: true,
-    aspect: [1, 1],
-    quality: 0.6,
+    quality: 0.8,
   };
   let res: ImagePicker.ImagePickerResult;
   if (desde === "camara") {
@@ -48,10 +52,59 @@ export async function persistirImagen(uriTemporal: string): Promise<string> {
   return destino;
 }
 
-/** Borra una imagen persistida (solo si es nuestra). Nunca lanza. */
+// --- Foto original + su recorte -------------------------------------------
+// En `productos.imagen_uri` solo cabe UNA ruta, pero para poder RE-AJUSTAR
+// el encuadre después hace falta conservar la foto completa (si solo se
+// guarda el recorte, lo que quedó fuera se perdió y "Ajustar" solo puede
+// moverse dentro del recorte — que era justo el bug). Solución sin tocar la
+// base de datos: la original vive junto al recorte con el sufijo "-orig".
+//   recorte:  .../productos/abc123.jpg
+//   original: .../productos/abc123-orig.jpg
+
+function rutaOriginalDe(uriRecorte: string): string {
+  return uriRecorte.replace(/\.jpg$/i, "-orig.jpg").replace(/\.png$/i, "-orig.jpg");
+}
+
+/** Persiste el recorte Y la foto completa de la que salió, emparejados.
+ *  Devuelve la uri del RECORTE (la que se guarda en el producto). */
+export async function persistirRecorteConOriginal(
+  uriRecorteTemporal: string,
+  uriOriginalTemporal: string
+): Promise<string> {
+  await asegurarCarpeta();
+  const destino = CARPETA + uuid() + ".jpg";
+  await FileSystem.copyAsync({ from: uriRecorteTemporal, to: destino });
+  // La original es un extra: si falla, el producto igual se queda con su
+  // foto; solo se pierde la posibilidad de reajustar sin volver a tomarla.
+  await FileSystem.copyAsync({
+    from: uriOriginalTemporal,
+    to: rutaOriginalDe(destino),
+  }).catch(() => {});
+  return destino;
+}
+
+/** La foto completa de la que salió este recorte, si se conserva. Devuelve
+ *  null para fotos viejas (guardadas antes de que existiera el reajuste) o
+ *  si el archivo ya no está. */
+export async function originalDe(uriRecorte: string | null): Promise<string | null> {
+  if (!uriRecorte || !uriRecorte.startsWith(CARPETA)) return null;
+  const ruta = rutaOriginalDe(uriRecorte);
+  try {
+    const info = await FileSystem.getInfoAsync(ruta);
+    return info.exists ? ruta : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Borra una imagen persistida (solo si es nuestra) Y su original
+ *  emparejada, si existe. Nunca lanza. */
 export async function borrarImagen(uri: string | null): Promise<void> {
   if (!uri || !uri.startsWith(CARPETA)) return;
   await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+  await FileSystem.deleteAsync(rutaOriginalDe(uri), { idempotent: true }).catch(
+    () => {}
+  );
 }
 
 import { estadoCuenta } from "./nube";

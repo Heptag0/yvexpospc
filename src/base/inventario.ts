@@ -12,9 +12,10 @@ import { bd, uuid, ahoraISO } from "./db";
 import { borrarImagen } from "./imagenes";
 import { encolar } from "./sync";
 
-export const UNIDADES = [
-  "pieza", "kg", "g", "litro", "ml", "caja", "paquete", "metro",
-] as const;
+// Mismas 3 unidades que el PC (unidad TEXT CHECK IN ('pieza','kg','litro')):
+// el formulario ya no pide "unidad" suelta, pide CÓMO SE VENDE
+// (Pieza / A granel / Paquete), y granel resuelve a kg o litro.
+export const UNIDADES = ["pieza", "kg", "litro"] as const;
 export type Unidad = (typeof UNIDADES)[number];
 
 export type Producto = {
@@ -30,6 +31,7 @@ export type Producto = {
   stock_minimo: number;
   unidad: string;
   es_kit: number;
+  favorito: number;
   imagen_uri: string | null;
 };
 
@@ -69,6 +71,7 @@ export type DatosProducto = {
   stock_minimo: number;
   unidad: string;
   es_kit: boolean;
+  favorito: boolean;
   imagen_uri: string | null;
   componentes: { producto_id: string; cantidad: number }[];
 };
@@ -218,14 +221,15 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
     `INSERT INTO productos
       (id, codigo_barras, nombre, categoria_id, precio_venta_centavos,
        costo_centavos, precio_mayoreo_centavos, controla_stock, stock,
-       stock_minimo, unidad, es_kit, imagen_uri, activo, eliminado, creado_en, actualizado_en)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
+       stock_minimo, unidad, es_kit, favorito, imagen_uri, activo, eliminado, creado_en, actualizado_en)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
     [
       id, codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
       d.costo_centavos, d.precio_mayoreo_centavos,
       d.es_kit ? 0 : d.controla_stock ? 1 : 0,
       d.es_kit ? 0 : d.stock,
-      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.imagen_uri, ahora, ahora,
+      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
+      d.imagen_uri, ahora, ahora,
     ]
   );
   if (d.es_kit) await guardarComponentes(id, d.componentes);
@@ -236,7 +240,7 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
     precio_mayoreo_centavos: d.precio_mayoreo_centavos, cantidad_mayoreo: null,
     iva_tasa: 0, controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
     stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-    favorito: 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, creado_en: ahora,
+    favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, creado_en: ahora,
     actualizado_en: ahora,
   });
   return id;
@@ -254,14 +258,15 @@ export async function editarProducto(d: DatosProducto): Promise<void> {
     `UPDATE productos SET
       codigo_barras = ?, nombre = ?, categoria_id = ?, precio_venta_centavos = ?,
       costo_centavos = ?, precio_mayoreo_centavos = ?, controla_stock = ?,
-      stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, imagen_uri = ?, actualizado_en = ?
+      stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, favorito = ?, imagen_uri = ?, actualizado_en = ?
      WHERE id = ?`,
     [
       codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
       d.costo_centavos, d.precio_mayoreo_centavos,
       d.es_kit ? 0 : d.controla_stock ? 1 : 0,
       d.es_kit ? 0 : d.stock,
-      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.imagen_uri, ahoraEd, d.id,
+      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
+      d.imagen_uri, ahoraEd, d.id,
     ]
   );
   if (d.es_kit) await guardarComponentes(d.id, d.componentes);
@@ -274,7 +279,7 @@ export async function editarProducto(d: DatosProducto): Promise<void> {
     cantidad_mayoreo: null, iva_tasa: 0,
     controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
     stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-    favorito: 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, actualizado_en: ahoraEd,
+    favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, actualizado_en: ahoraEd,
   }, "update");
 }
 
@@ -420,7 +425,7 @@ export async function aplicarResurtido(
           precio_venta_centavos: l.precio_centavos ?? 0,
           costo_centavos: l.costo_centavos, precio_mayoreo_centavos: null,
           controla_stock: true, stock: l.piezas, stock_minimo: 0,
-          unidad: "pieza", es_kit: false, imagen_uri: null, componentes: [],
+          unidad: "pieza", es_kit: false, favorito: false, imagen_uri: null, componentes: [],
         });
         const clavePerfilNuevo = l.aliasClaves?.[0] ?? "";
         if (clavePerfilNuevo) {

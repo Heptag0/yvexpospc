@@ -57,6 +57,7 @@ import { estadoTienda } from "@/src/base/tienda";
 import { leerReglas } from "@/src/base/lealtad";
 import ModalDinero from "@/src/componentes/ModalDinero";
 import ModalEtiquetas from "@/src/componentes/ModalEtiquetas";
+import ModalMovimientoCaja from "@/src/componentes/ModalMovimientoCaja";
 import {
   Mision,
   obtenerMisiones,
@@ -199,6 +200,7 @@ export default function InicioScreen() {
   const [lealtadAbierto, setLealtadAbierto] = useState(false);
   const [cotizacionesAbierto, setCotizacionesAbierto] = useState(false);
   const [dineroAbierto, setDineroAbierto] = useState(false);
+  const [movimientoAbierto, setMovimientoAbierto] = useState(false);
   const [etiquetasAbierto, setEtiquetasAbierto] = useState(false);
   const [tiendaAbierto, setTiendaAbierto] = useState(false);
   const [pedidosWebAbierto, setPedidosWebAbierto] = useState(false);
@@ -422,6 +424,16 @@ export default function InicioScreen() {
                 Desde {fmtFecha(turno.abierta_en)} · fondo {pesos(turno.fondo_inicial_centavos)}
               </Text>
             </View>
+            {/* Movimiento manual de efectivo: acción secundaria y rápida,
+                sin salir de Inicio. El corte ya suma/resta lo que se registre
+                aquí (entradas_centavos / salidas_centavos). */}
+            <Pressable
+              style={est.turnoBtnIcono}
+              onPress={() => setMovimientoAbierto(true)}
+              hitSlop={8}
+            >
+              <IconoUI id="dinero" size={18} color={T.textoSuave} />
+            </Pressable>
             <Pressable style={est.turnoBtn} onPress={pedirCorte}>
               <Text style={est.turnoBtnTxt}>Corte</Text>
             </Pressable>
@@ -577,6 +589,17 @@ export default function InicioScreen() {
             <View style={{ flex: 1 }}>
               <Text style={est.accesoTitulo}>Productos</Text>
               <Text style={est.accesoMeta}>Agrega productos con foto y precio</Text>
+            </View>
+            <Text style={est.accesoFlecha}>→</Text>
+          </Pressable>
+          <Pressable
+            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
+            onPress={() => setProveedoresAbierto(true)}
+          >
+            <IconoUI id="camion" size={21} color={T.acento} />
+            <View style={{ flex: 1 }}>
+              <Text style={est.accesoTitulo}>Proveedores</Text>
+              <Text style={est.accesoMeta}>Compras, días de visita y su historial</Text>
             </View>
             <Text style={est.accesoFlecha}>→</Text>
           </Pressable>
@@ -755,6 +778,13 @@ export default function InicioScreen() {
           onCambio={cargar}
         />
       )}
+      {movimientoAbierto && turno && (
+        <ModalMovimientoCaja
+          turno={turno}
+          onCerrar={() => setMovimientoAbierto(false)}
+          onGuardado={cargar}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -820,6 +850,16 @@ function crearEstilos(T: Tema) {
       paddingVertical: 10,
     },
     turnoBtnTxt: { color: T.turquesa, fontSize: 14, fontWeight: "800" },
+    turnoBtnIcono: {
+      width: 40,
+      height: 40,
+      borderRadius: T.radioChico,
+      borderWidth: 1,
+      borderColor: T.bordeFuerte,
+      backgroundColor: T.superficie2,
+      alignItems: "center",
+      justifyContent: "center",
+    },
 
     seccion: {
       color: T.textoSuave,

@@ -286,12 +286,20 @@ export async function cobrar(
 
     for (const it of items) {
       const totalLinea = Math.round(it.precio_centavos * it.cantidad);
+      // Costo AL MOMENTO de vender, no el que tenga el producto después.
+      // Se lee fresco de la base (no se confía en lo que traiga el carrito
+      // del frontend para el dinero — mismo criterio que el PC).
+      const prodCosto = await db.getFirstAsync<{ costo_centavos: number | null }>(
+        "SELECT costo_centavos FROM productos WHERE id = ?",
+        [it.producto_id]
+      );
+      const costoUnitario = prodCosto?.costo_centavos ?? 0;
       await db.runAsync(
         `INSERT INTO venta_lineas
           (id, venta_id, producto_id, nombre_producto, cantidad,
-           precio_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
-         VALUES (?,?,?,?,?,?,0,?,?)`,
-        [uuid(), ventaId, it.producto_id, it.nombre, it.cantidad, it.precio_centavos, totalLinea, ahora]
+           precio_unitario_centavos, costo_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
+         VALUES (?,?,?,?,?,?,?,0,?,?)`,
+        [uuid(), ventaId, it.producto_id, it.nombre, it.cantidad, it.precio_centavos, costoUnitario, totalLinea, ahora]
       );
 
       if (it.es_kit) {
@@ -363,7 +371,7 @@ export async function cobrar(
       descripcion: l.nombre_producto,
       cantidad: l.cantidad,
       precio_unitario_centavos: l.precio_unitario_centavos,
-      costo_unitario_centavos: 0,
+      costo_unitario_centavos: l.costo_unitario_centavos,
       descuento_linea_centavos: l.descuento_linea_centavos,
       total_linea_centavos: l.total_linea_centavos,
       creado_en: l.creado_en,
@@ -540,12 +548,22 @@ export async function registrarVentaWeb(
     for (const l of lineas) {
       const pid = l.producto_id && existentes.has(l.producto_id) ? l.producto_id : null;
       const totalLinea = Math.round(l.precio_centavos * l.cantidad);
+      // Costo real solo si hay producto de verdad (envío y productos ya
+      // borrados del catálogo se quedan en 0: no hay costo que capturar).
+      let costoUnitario = 0;
+      if (pid) {
+        const prodCosto = await db.getFirstAsync<{ costo_centavos: number | null }>(
+          "SELECT costo_centavos FROM productos WHERE id = ?",
+          [pid]
+        );
+        costoUnitario = prodCosto?.costo_centavos ?? 0;
+      }
       await db.runAsync(
         `INSERT INTO venta_lineas
           (id, venta_id, producto_id, nombre_producto, cantidad,
-           precio_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
-         VALUES (?,?,?,?,?,?,0,?,?)`,
-        [uuid(), ventaId, pid, l.nombre, l.cantidad, l.precio_centavos, totalLinea, ahora]
+           precio_unitario_centavos, costo_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
+         VALUES (?,?,?,?,?,?,?,0,?,?)`,
+        [uuid(), ventaId, pid, l.nombre, l.cantidad, l.precio_centavos, costoUnitario, totalLinea, ahora]
       );
       // Stock: igual que una venta normal (no-op si no controla stock; las
       // líneas libres — envío o producto borrado — no tienen pid).
@@ -606,7 +624,7 @@ export async function registrarVentaWeb(
       descripcion: l.nombre_producto,
       cantidad: l.cantidad,
       precio_unitario_centavos: l.precio_unitario_centavos,
-      costo_unitario_centavos: 0,
+      costo_unitario_centavos: l.costo_unitario_centavos,
       descuento_linea_centavos: l.descuento_linea_centavos,
       total_linea_centavos: l.total_linea_centavos,
       creado_en: l.creado_en,

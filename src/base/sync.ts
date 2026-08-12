@@ -354,6 +354,9 @@ type Bajada = {
   // Config del negocio (lista blanca del servidor: lealtad, IVA, datos
   // fiscales). Nunca preferencias por-dispositivo (usuario activo, etc.).
   config?: any[];
+  // Cotizaciones del negocio (de cualquier caja): carrito armado sin cobrar.
+  cotizaciones?: any[];
+  cotizacion_lineas?: any[];
 };
 
 async function bajar(
@@ -519,13 +522,14 @@ async function bajar(
       await db.runAsync(
         `INSERT INTO venta_lineas
           (id, venta_id, producto_id, nombre_producto, cantidad,
-           precio_unitario_centavos, descuento_linea_centavos,
+           precio_unitario_centavos, costo_unitario_centavos, descuento_linea_centavos,
            total_linea_centavos, creado_en)
-         VALUES (?,?,?,?,?,?,?,?,?)
+         VALUES (?,?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO NOTHING`,
         [
           l.id, l.venta_id, l.producto_id, l.descripcion, l.cantidad,
-          l.precio_unitario_centavos, l.descuento_linea_centavos ?? 0,
+          l.precio_unitario_centavos, l.costo_unitario_centavos ?? 0,
+          l.descuento_linea_centavos ?? 0,
           l.total_linea_centavos, l.creado_en,
         ]
       );
@@ -613,6 +617,56 @@ async function bajar(
       // insert es solo para que el historial del cliente muestre el
       // movimiento que hizo la otra caja.
       aplicados++;
+    }
+
+    // --- Cotizaciones del negocio (de cualquier caja) ---
+    // DO UPDATE en todo el estado: una cotización SÍ cambia después de creada
+    // (se cancela, vence, o se convierte en venta desde otro dispositivo).
+    for (const cot of (d.cotizaciones ?? [])) {
+      await db.runAsync(
+        `INSERT INTO cotizaciones
+          (id, folio, cliente_nombre, cliente_telefono, cliente_correo, notas,
+           subtotal_centavos, descuento_centavos, total_centavos, valida_hasta,
+           estado, venta_id, eliminado, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET
+           cliente_nombre = excluded.cliente_nombre,
+           cliente_telefono = excluded.cliente_telefono,
+           cliente_correo = excluded.cliente_correo,
+           notas = excluded.notas,
+           subtotal_centavos = excluded.subtotal_centavos,
+           descuento_centavos = excluded.descuento_centavos,
+           total_centavos = excluded.total_centavos,
+           valida_hasta = excluded.valida_hasta,
+           estado = excluded.estado,
+           venta_id = excluded.venta_id,
+           eliminado = excluded.eliminado,
+           actualizado_en = excluded.actualizado_en`,
+        [
+          cot.id, cot.folio, cot.cliente_nombre ?? null, cot.cliente_telefono ?? null,
+          cot.cliente_correo ?? null, cot.notas ?? null, cot.subtotal_centavos ?? 0,
+          cot.descuento_centavos ?? 0, cot.total_centavos ?? 0, cot.valida_hasta ?? null,
+          cot.estado ?? "abierta", cot.venta_id ?? null, cot.eliminado ? 1 : 0,
+          cot.creado_en, cot.actualizado_en,
+        ]
+      );
+      aplicados++;
+    }
+
+    // --- Líneas de esas cotizaciones (no cambian una vez creadas) ---
+    for (const l of (d.cotizacion_lineas ?? [])) {
+      await db.runAsync(
+        `INSERT INTO cotizacion_lineas
+          (id, cotizacion_id, producto_id, descripcion, cantidad,
+           precio_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
+         VALUES (?,?,?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO NOTHING`,
+        [
+          l.id, l.cotizacion_id, l.producto_id ?? null, l.descripcion, l.cantidad,
+          l.precio_unitario_centavos, l.descuento_linea_centavos ?? 0,
+          l.total_linea_centavos, l.creado_en,
+        ]
+      );
     }
 
     // --- Config del negocio (lealtad, IVA, datos fiscales…). El servidor
