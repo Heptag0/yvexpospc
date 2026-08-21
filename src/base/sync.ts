@@ -342,6 +342,11 @@ type Bajada = {
   ventas: any[];
   venta_lineas: any[];
   pagos: any[];
+  // Se asume que cada fila trae `dispositivo_id` (sync.py lo inyecta al
+  // guardar, vía "inyecta_dispositivo": True) — pero nunca se vio el
+  // endpoint /sync/bajar en sí, solo /sync/lote. Si el servidor no lo
+  // incluye en la respuesta de bajada, el campo simplemente llega
+  // `undefined` y se guarda NULL (ver `bajar()`, sin romper nada).
   caja_sesiones: any[];
   usuarios?: any[]; // cajeros de otras cajas (sin PIN), desde backend nuevo
   // Clientes del negocio: compartidos. `puntos` YA viene calculado por el
@@ -480,19 +485,25 @@ async function bajar(
     }
 
     // --- Turnos de otras cajas (necesarios: las ventas los referencian) ---
+    // dispositivo_id se captura ahora (antes se descartaba): sin él,
+    // turnoActivo() no puede distinguir "mi turno" de uno bajado de otra
+    // caja. Defensivo con `?? null`: si el payload de /sync/bajar no trae
+    // este campo, se guarda NULL — mismo comportamiento de antes, sin
+    // romper nada, listo para capturarlo en cuanto el backend lo mande.
     for (const s of d.caja_sesiones) {
       await db.runAsync(
         `INSERT INTO caja_sesiones
           (id, usuario_pos_id, fondo_inicial_centavos, abierta_en, cerrada_en,
-           estado, creado_en, actualizado_en)
-         VALUES (?,?,?,?,?,?,?,?)
+           estado, dispositivo_id, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?,?)
          ON CONFLICT(id) DO UPDATE SET
            cerrada_en = excluded.cerrada_en,
            estado = excluded.estado,
+           dispositivo_id = excluded.dispositivo_id,
            actualizado_en = excluded.actualizado_en`,
         [
           s.id, s.usuario_pos_id, s.fondo_inicial_centavos, s.abierta_en,
-          s.cerrada_en, s.estado, s.abierta_en, s.actualizado_en,
+          s.cerrada_en, s.estado, s.dispositivo_id ?? null, s.abierta_en, s.actualizado_en,
         ]
       );
       aplicados++;

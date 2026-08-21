@@ -1,24 +1,25 @@
 // YvexPOS Móvil — Proveedores y compras (modal con sub-vistas).
 //
-// Vistas internas (como ModalAjustesEscaner): lista -> detalle -> form /
-// compra manual. El escáner de tickets ya deja compras solito; aquí el
-// dueño ve el resumen por proveedor, marca los días que pasa (para el
-// aviso de Inicio) y registra compras a mano.
+// Vistas internas: lista -> detalle -> form / compra manual. El escáner de
+// tickets ya deja compras solito; aquí el dueño ve el resumen por
+// proveedor, marca los días que pasa (para el aviso de Inicio) y registra
+// compras a mano.
 //
-// Todo sale del tema ACTIVO (useTema): nada de colores fijos.
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// 1. T.turquesa en 4 sitios (icono del camión, "Viene: Lu Ma", la flecha de
+//    cada fila, el total de cada compra) -> T.acento. El morado fantasma
+//    que venimos limpiando desde la Fase 1.
+// 2. Alert.alert (eliminar proveedor) -> <Hoja> chica anidada, mismo patrón
+//    que ModalDepartamentos y FormularioProducto.
+// 3. BackHandler para el drill-down (lista -> detalle/form/compra): sin
+//    él, Atrás cerraba todo el modal en vez de retroceder un nivel.
+// 4. Las listas (proveedores, historial de compras) pasan a <Fila>/<Grupo>
+//    con <Monto> para los totales.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import {
-  Modal,
-  View,
-  Text,
-  TextInput,
-  ScrollView,
-  Pressable,
-  StyleSheet,
-  Alert,
-  ActivityIndicator,
-} from "react-native";
+import { Modal, View, TextInput, ScrollView, Pressable, ActivityIndicator, BackHandler } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   ProveedorResumen,
@@ -35,9 +36,7 @@ import { pesos, aCentavos, fmtFecha } from "@/src/base/formato";
 import { hoyYmd } from "@/src/base/visitas";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { IconoUI } from "@/src/componentes/iconos";
-import { Boton, Banner, CabeceraModal, Campo, useEstiloInput } from "@/src/componentes/ui";
-
-type Tema = ReturnType<typeof useTema>["tema"];
+import { Boton, Banner, CabeceraModal, Campo, Hoja, Grupo, Fila, Lamina, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
 
 type Props = {
   onCerrar: () => void;
@@ -60,7 +59,6 @@ const DIAS: { n: number; corto: string }[] = [
 
 export default function ModalProveedores({ onCerrar, onCambio }: Props) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
 
   const [vista, setVista] = useState<Vista>("lista");
@@ -69,6 +67,7 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
   const [busqueda, setBusqueda] = useState("");
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
+  const [confirmandoBorrado, setConfirmandoBorrado] = useState<ProveedorResumen | null>(null);
 
   // Detalle
   const [detalle, setDetalle] = useState<ProveedorResumen | null>(null);
@@ -104,6 +103,27 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
   useEffect(() => {
     cargar();
   }, [cargar]);
+
+  // Atrás del sistema: retrocede un nivel en vez de cerrar todo el modal.
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (vista === "detalle") {
+        setVista("lista");
+        return true;
+      }
+      if (vista === "form") {
+        setVista(editando ? "detalle" : "lista");
+        return true;
+      }
+      if (vista === "compra") {
+        setVista(detalle && compraProvId === detalle.id ? "detalle" : "lista");
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+  }, [vista, editando, detalle, compraProvId]);
 
   async function abrirDetalle(p: ProveedorResumen) {
     setError("");
@@ -157,29 +177,19 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
     }
   }
 
-  function confirmarEliminar(p: ProveedorResumen) {
-    Alert.alert(
-      "Eliminar proveedor",
-      `¿Eliminar "${p.nombre}"? Su historial de compras se conserva, solo deja de aparecer en la lista.`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Eliminar",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await eliminarProveedor(p.id);
-              await cargar();
-              onCambio?.();
-              setVista("lista");
-              setDetalle(null);
-            } catch (e: any) {
-              setError(e?.message ?? String(e));
-            }
-          },
-        },
-      ]
-    );
+  async function confirmarEliminar() {
+    if (!confirmandoBorrado) return;
+    try {
+      await eliminarProveedor(confirmandoBorrado.id);
+      await cargar();
+      onCambio?.();
+      setConfirmandoBorrado(null);
+      setVista("lista");
+      setDetalle(null);
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      setConfirmandoBorrado(null);
+    }
   }
 
   async function guardarCompra() {
@@ -256,60 +266,57 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
 
   function VistaLista() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
         <TextInput
-          style={[estiloInput, { marginBottom: 12 }]}
+          style={[estiloInput, { marginBottom: T.esps.md }]}
           value={busqueda}
           onChangeText={setBusqueda}
           placeholder="Buscar proveedor…"
           placeholderTextColor={T.textoTenue}
         />
-        <View style={{ marginBottom: 18 }}>
+        <View style={{ marginBottom: T.esps.md }}>
           <Boton titulo="+ Nuevo proveedor" onPress={() => abrirForm(null)} />
         </View>
-        <View style={{ marginBottom: 18 }}>
+        <View style={{ marginBottom: T.esps.lg }}>
           <Boton titulo="Registrar compra a mano" tipo="secundario" onPress={() => abrirCompra(proveedores[0]?.id ?? null)} />
         </View>
         {cargando ? (
-          <ActivityIndicator color={T.acento} style={{ marginTop: 30 }} />
+          <ActivityIndicator color={T.acento} style={{ marginTop: T.esps.xl }} />
         ) : filtrados.length === 0 ? (
-          <Text style={est.vacio}>
-            {busqueda
-              ? "Sin resultados con esa búsqueda."
-              : "Aún no tienes proveedores.\n\nAgrégalos aquí, o escanea un ticket de surtido y se registran solos."}
-          </Text>
+          <Vacio
+            titulo={busqueda ? "Sin resultados" : "Aún no tienes proveedores"}
+            texto={
+              busqueda
+                ? "Prueba con otro nombre."
+                : "Agrégalos aquí, o escanea un ticket de surtido y se registran solos."
+            }
+          />
         ) : (
-          filtrados.map((p) => (
-            <Pressable
-              key={p.id}
-              style={({ pressed }) => [est.fila, pressed && { backgroundColor: T.superficie3 }]}
-              onPress={() => abrirDetalle(p)}
-            >
-              <View style={est.filaIcono}>
-                <IconoUI id="proveedor" size={19} color={T.acento} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={est.filaNombre} numberOfLines={1}>{p.nombre}</Text>
-                <Text style={est.filaMeta} numberOfLines={1}>{resumenLinea(p)}</Text>
-                {p.dias_visita && p.dias_visita.length > 0 && (
-                  <Text style={est.filaDias} numberOfLines={1}>
-                    Viene: {DIAS.filter((d) => p.dias_visita!.includes(d.n)).map((d) => d.corto).join(" ")}
-                  </Text>
-                )}
-              </View>
-              <Text style={est.filaFlecha}>→</Text>
-            </Pressable>
-          ))
+          <Grupo>
+            {filtrados.map((p) => (
+              <Fila
+                key={p.id}
+                titulo={p.nombre}
+                meta={
+                  p.dias_visita && p.dias_visita.length > 0
+                    ? `${resumenLinea(p)}\nViene: ${DIAS.filter((d) => p.dias_visita!.includes(d.n)).map((d) => d.corto).join(" ")}`
+                    : resumenLinea(p)
+                }
+                icono={<IconoUI id="camion" size={19} color={T.acento} />}
+                onPress={() => abrirDetalle(p)}
+              />
+            ))}
+          </Grupo>
         )}
-        <View style={{ height: 30 }} />
+        <View style={{ height: T.esps.xl }} />
       </ScrollView>
     );
   }
 
   function VistaForm() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
         <Campo label="Nombre">
           <TextInput
@@ -342,26 +349,34 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
           />
         </Campo>
 
-        <Text style={est.subLbl}>¿QUÉ DÍAS VIENE?</Text>
-        <Text style={est.ayuda}>
+        <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+          ¿Qué días viene?
+        </Txt>
+        <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.md }}>
           Si lo marcas, Inicio te avisa cuando esté por llegar, junto con tu
           último ticket y tu promedio — para que sepas cuánto apartarle.
-        </Text>
-        <View style={est.dias}>
+        </Txt>
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.sm, marginBottom: T.esps.xl }}>
           {DIAS.map((d) => {
             const activo = dias.includes(d.n);
             return (
               <Pressable
                 key={d.n}
                 onPress={() => toggleDia(d.n)}
-                style={[
-                  est.diaChip,
-                  activo && { backgroundColor: T.acento, borderColor: T.acento },
-                ]}
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: 22,
+                  backgroundColor: activo ? T.acentoRelleno : T.superficie2,
+                  borderWidth: 1,
+                  borderColor: activo ? T.acentoRelleno : T.borde,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
               >
-                <Text style={[est.diaChipTxt, activo && { color: T.acentoTexto, fontWeight: "800" }]}>
+                <Txt escala="pie" fuerte tono={activo ? "principal" : "suave"} estilo={activo ? { color: T.acentoTexto } : undefined}>
                   {d.corto}
-                </Text>
+                </Txt>
               </Pressable>
             );
           })}
@@ -373,7 +388,7 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
           cargando={guardando}
           deshabilitado={!nombre.trim()}
         />
-        <View style={{ height: 30 }} />
+        <View style={{ height: T.esps.xl }} />
       </ScrollView>
     );
   }
@@ -382,47 +397,66 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
     if (!detalle) return null;
     const p = detalle;
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
 
-        {/* Resumen grande */}
-        <View style={est.resumen}>
-          <Text style={est.resumenLbl}>COMPRAS REGISTRADAS</Text>
-          <Text style={est.resumenVal}>{p.totalCompras}</Text>
-          <View style={est.resumenFila}>
-            <View style={est.resumenDato}>
-              <Text style={est.resumenDatoVal}>
-                {p.ultimoTicketCentavos != null ? pesos(p.ultimoTicketCentavos) : "—"}
-              </Text>
-              <Text style={est.resumenDatoLbl}>último ticket</Text>
+        {/* Resumen — la cifra protagonista de esta pantalla. */}
+        <View style={{ marginBottom: T.esps.lg }}>
+          <Lamina>
+            <Txt escala="micro" tono="suave" fuerte mayus>
+              Compras registradas
+            </Txt>
+            <View style={{ marginTop: T.esps.xs }}>
+              <Monto texto={String(p.totalCompras)} escala="protagonista" />
             </View>
-            <View style={est.resumenDato}>
-              <Text style={est.resumenDatoVal}>
-                {p.ticketPromedioCentavos != null ? pesos(p.ticketPromedioCentavos) : "—"}
-              </Text>
-              <Text style={est.resumenDatoLbl}>ticket promedio</Text>
+            <View
+              style={{
+                flexDirection: "row",
+                marginTop: T.esps.lg,
+                paddingTop: T.esps.lg,
+                borderTopWidth: 1,
+                borderTopColor: T.borde,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Monto texto={p.ultimoTicketCentavos != null ? pesos(p.ultimoTicketCentavos) : "—"} escala="cuerpo" />
+                <Txt escala="pie" tono="suave">último ticket</Txt>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Monto texto={p.ticketPromedioCentavos != null ? pesos(p.ticketPromedioCentavos) : "—"} escala="cuerpo" />
+                <Txt escala="pie" tono="suave">promedio</Txt>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Txt escala="cuerpo" fuerte>{p.ultimaFecha ? fmtFecha(p.ultimaFecha) : "—"}</Txt>
+                <Txt escala="pie" tono="suave">última vez</Txt>
+              </View>
             </View>
-            <View style={est.resumenDato}>
-              <Text style={est.resumenDatoVal}>
-                {p.ultimaFecha ? fmtFecha(p.ultimaFecha) : "—"}
-              </Text>
-              <Text style={est.resumenDatoLbl}>última vez</Text>
-            </View>
-          </View>
+          </Lamina>
         </View>
 
         {p.dias_visita && p.dias_visita.length > 0 && (
-          <View style={est.rutina}>
-            <IconoUI id="camion" size={18} color={T.turquesa} />
-            <Text style={est.rutinaTxt}>
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              gap: T.esps.sm,
+              backgroundColor: T.acentoSuave,
+              borderRadius: T.radioChico,
+              paddingHorizontal: T.esps.md,
+              paddingVertical: T.esps.sm,
+              marginBottom: T.esps.md,
+            }}
+          >
+            <IconoUI id="camion" size={18} color={T.acento} />
+            <Txt escala="pie" fuerte>
               Viene: {DIAS.filter((d) => p.dias_visita!.includes(d.n)).map((d) => d.corto).join(" · ")}
-            </Text>
+            </Txt>
           </View>
         )}
-        {p.telefono ? <Text style={est.metaSuelto}>Tel: {p.telefono}</Text> : null}
-        {p.notas ? <Text style={est.metaSuelto}>{p.notas}</Text> : null}
+        {p.telefono ? <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.xs }}>Tel: {p.telefono}</Txt> : null}
+        {p.notas ? <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.md }}>{p.notas}</Txt> : null}
 
-        <View style={est.detalleBotones}>
+        <View style={{ flexDirection: "row", gap: T.esps.sm, marginVertical: T.esps.lg }}>
           <View style={{ flex: 1 }}>
             <Boton titulo="Registrar compra" tipo="secundario" chico onPress={() => abrirCompra(p.id)} />
           </View>
@@ -430,73 +464,98 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
             <Boton titulo="Editar" tipo="secundario" chico onPress={() => abrirForm(p)} />
           </View>
           <View style={{ flex: 1 }}>
-            <Boton titulo="Eliminar" tipo="peligro" chico onPress={() => confirmarEliminar(p)} />
+            <Boton titulo="Eliminar" tipo="peligro" chico onPress={() => setConfirmandoBorrado(p)} />
           </View>
         </View>
 
         {/* Historial de compras */}
-        <Text style={est.listaTitulo}>Historial de compras</Text>
+        <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
+          Historial de compras
+        </Txt>
         {compras.length === 0 ? (
-          <Text style={est.vacio}>
-            Nada todavía. Escanea un ticket de este proveedor o regístralo a mano.
-          </Text>
+          <Vacio
+            titulo="Nada todavía"
+            texto="Escanea un ticket de este proveedor o regístralo a mano."
+          />
         ) : (
-          compras.map((c) => (
-            <View key={c.id} style={est.compra}>
-              <View style={{ flex: 1 }}>
-                <Text style={est.compraFecha}>
-                  {c.fecha ? fmtFecha(c.fecha) : fmtFecha(c.creado_en)}
-                  {c.tipo === "preventa" && <Text style={{ color: T.alerta, fontWeight: "800" }}> · Preventa</Text>}
-                </Text>
-                <Text style={est.compraMeta} numberOfLines={1}>
-                  {[
-                    c.folio ? `Folio ${c.folio}` : null,
-                    c.num_lineas > 0 ? `${c.num_lineas} línea${c.num_lineas === 1 ? "" : "s"}` : null,
-                    c.origen === "escaner" ? "Escáner" : "Manual",
-                  ]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </Text>
-                {c.notas ? <Text style={est.compraNotas} numberOfLines={2}>{c.notas}</Text> : null}
-              </View>
-              <Text style={est.compraTotal}>{pesos(c.total_centavos)}</Text>
-            </View>
-          ))
+          <Grupo>
+            {compras.map((c) => (
+              <Fila
+                key={c.id}
+                titulo={`${c.fecha ? fmtFecha(c.fecha) : fmtFecha(c.creado_en)}${c.tipo === "preventa" ? " · Preventa" : ""}`}
+                meta={[
+                  c.folio ? `Folio ${c.folio}` : null,
+                  c.num_lineas > 0 ? `${c.num_lineas} línea${c.num_lineas === 1 ? "" : "s"}` : null,
+                  c.origen === "escaner" ? "Escáner" : "Manual",
+                  c.notas || null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ")}
+                flecha={false}
+                valor={<Monto texto={pesos(c.total_centavos)} escala="pie" />}
+              />
+            ))}
+          </Grupo>
         )}
-        <View style={{ height: 30 }} />
+        <View style={{ height: T.esps.xl }} />
       </ScrollView>
     );
   }
 
   function VistaCompra() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
 
-        <Text style={est.subLbl}>PROVEEDOR</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, marginBottom: 14 }}>
-          <View style={est.provChips}>
+        <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
+          Proveedor
+        </Txt>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0, marginBottom: T.esps.lg }}>
+          <View style={{ flexDirection: "row", gap: T.esps.sm }}>
             {proveedores.map((p) => {
               const activo = compraProvId === p.id;
               return (
                 <Pressable
                   key={p.id}
                   onPress={() => setCompraProvId(p.id)}
-                  style={[est.provChip, activo && { backgroundColor: T.acento, borderColor: T.acento }]}
+                  style={{
+                    paddingHorizontal: T.esps.lg,
+                    height: 38,
+                    borderRadius: 19,
+                    backgroundColor: activo ? T.acentoRelleno : T.superficie2,
+                    borderWidth: 1,
+                    borderColor: activo ? T.acentoRelleno : T.borde,
+                    alignItems: "center",
+                    justifyContent: "center",
+                  }}
                 >
-                  <Text style={[est.provChipTxt, activo && { color: T.acentoTexto, fontWeight: "800" }]} numberOfLines={1}>
+                  <Txt escala="pie" fuerte={activo} tono={activo ? "principal" : "suave"} estilo={activo ? { color: T.acentoTexto } : undefined} lineas={1}>
                     {p.nombre}
-                  </Text>
+                  </Txt>
                 </Pressable>
               );
             })}
             <Pressable
               onPress={() => setCompraProvId(null)}
-              style={[est.provChip, compraProvId === null && { backgroundColor: T.acento, borderColor: T.acento }]}
+              style={{
+                paddingHorizontal: T.esps.lg,
+                height: 38,
+                borderRadius: 19,
+                backgroundColor: compraProvId === null ? T.acentoRelleno : T.superficie2,
+                borderWidth: 1,
+                borderColor: compraProvId === null ? T.acentoRelleno : T.borde,
+                alignItems: "center",
+                justifyContent: "center",
+              }}
             >
-              <Text style={[est.provChipTxt, compraProvId === null && { color: T.acentoTexto, fontWeight: "800" }]}>
+              <Txt
+                escala="pie"
+                fuerte={compraProvId === null}
+                tono={compraProvId === null ? "principal" : "suave"}
+                estilo={compraProvId === null ? { color: T.acentoTexto } : undefined}
+              >
                 Otro…
-              </Text>
+              </Txt>
             </Pressable>
           </View>
         </ScrollView>
@@ -543,19 +602,30 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
           />
         </Campo>
 
-        <Text style={est.subLbl}>TIPO</Text>
-        <View style={est.tipoFila}>
+        <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
+          Tipo
+        </Txt>
+        <View style={{ flexDirection: "row", gap: T.esps.sm, marginBottom: T.esps.lg }}>
           {(["normal", "preventa"] as const).map((tp) => {
             const activo = compraTipo === tp;
             return (
               <Pressable
                 key={tp}
                 onPress={() => setCompraTipo(tp)}
-                style={[est.tipoChip, activo && { backgroundColor: T.acento, borderColor: T.acento }]}
+                style={{
+                  flex: 1,
+                  height: 44,
+                  borderRadius: T.radioChico,
+                  backgroundColor: activo ? T.acentoRelleno : T.superficie2,
+                  borderWidth: 1,
+                  borderColor: activo ? T.acentoRelleno : T.borde,
+                  alignItems: "center",
+                  justifyContent: "center",
+                }}
               >
-                <Text style={[est.tipoChipTxt, activo && { color: T.acentoTexto, fontWeight: "800" }]}>
+                <Txt escala="pie" fuerte={activo} tono={activo ? "principal" : "suave"} estilo={activo ? { color: T.acentoTexto } : undefined}>
                   {tp === "normal" ? "Normal" : "Preventa"}
-                </Text>
+                </Txt>
               </Pressable>
             );
           })}
@@ -573,7 +643,7 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
         </Campo>
 
         <Boton titulo="Guardar compra" onPress={guardarCompra} cargando={guardando} />
-        <View style={{ height: 30 }} />
+        <View style={{ height: T.esps.xl }} />
       </ScrollView>
     );
   }
@@ -602,97 +672,32 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
 
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <CabeceraModal titulo={cabecera.titulo} onIzquierda={cabecera.onIzquierda} izquierda={cabecera.izquierda} />
         {vista === "lista" && VistaLista()}
         {vista === "detalle" && VistaDetalle()}
         {vista === "form" && VistaForm()}
         {vista === "compra" && VistaCompra()}
       </SafeAreaView>
+
+      {/* Confirmación de eliminar: hoja chica, sin Alert nativo. */}
+      <Hoja
+        visible={confirmandoBorrado !== null}
+        onCerrar={() => setConfirmandoBorrado(null)}
+        titulo="Eliminar proveedor"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Eliminar" tipo="peligro" onPress={confirmarEliminar} />
+            <Boton titulo="Cancelar" tipo="secundario" onPress={() => setConfirmandoBorrado(null)} />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {confirmandoBorrado
+            ? `¿Eliminar "${confirmandoBorrado.nombre}"? Su historial de compras se conserva, solo deja de aparecer en la lista.`
+            : ""}
+        </Txt>
+      </Hoja>
     </Modal>
   );
-}
-
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp },
-    vacio: {
-      color: T.textoTenue, textAlign: "center", marginTop: 26,
-      fontSize: 14.5, lineHeight: 22, paddingHorizontal: 20,
-    },
-    fila: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 14, marginBottom: 8,
-    },
-    filaIcono: {
-      width: 38, height: 38, borderRadius: 11,
-      backgroundColor: T.acento + "1f", borderWidth: 1, borderColor: T.acento + "44",
-      alignItems: "center", justifyContent: "center",
-    },
-    filaNombre: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    filaMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    filaDias: { color: T.turquesa, fontSize: 11.5, fontWeight: "700", marginTop: 3 },
-    filaFlecha: { color: T.turquesa, fontSize: 16, fontWeight: "800" },
-    subLbl: {
-      color: T.textoSuave, fontSize: 12, fontWeight: "800",
-      letterSpacing: 0.7, marginBottom: 9, textTransform: "uppercase",
-    },
-    ayuda: { color: T.textoTenue, fontSize: 12.5, lineHeight: 18, marginBottom: 12 },
-    dias: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 20 },
-    diaChip: {
-      width: 44, height: 44, borderRadius: 22,
-      backgroundColor: T.superficie2, borderWidth: 1, borderColor: T.borde,
-      alignItems: "center", justifyContent: "center",
-    },
-    diaChipTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
-    resumen: {
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderLeftWidth: 4, borderLeftColor: T.acento,
-      borderRadius: T.radioGrande, padding: 20, marginBottom: 14,
-    },
-    resumenLbl: { color: T.textoSuave, fontSize: 11, fontWeight: "800", letterSpacing: 1 },
-    resumenVal: { color: T.texto, fontSize: 34, fontWeight: "800", marginTop: 2 },
-    resumenFila: { flexDirection: "row", marginTop: 14, gap: 12 },
-    resumenDato: { flex: 1 },
-    resumenDatoVal: { color: T.texto, fontSize: 14.5, fontWeight: "800" },
-    resumenDatoLbl: { color: T.textoSuave, fontSize: 11, marginTop: 2 },
-    rutina: {
-      flexDirection: "row", alignItems: "center", gap: 9,
-      backgroundColor: T.superficie2, borderWidth: 1, borderColor: T.bordeFuerte,
-      borderRadius: T.radioChico + 2, paddingHorizontal: 13, paddingVertical: 10,
-      marginBottom: 12,
-    },
-    rutinaTxt: { color: T.texto, fontSize: 13.5, fontWeight: "700" },
-    metaSuelto: { color: T.textoSuave, fontSize: 13, marginBottom: 6 },
-    detalleBotones: { flexDirection: "row", gap: 8, marginVertical: 16 },
-    listaTitulo: {
-      color: T.textoSuave, fontSize: 12, fontWeight: "800",
-      letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 10,
-    },
-    compra: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 13, marginBottom: 8,
-    },
-    compraFecha: { color: T.texto, fontSize: 13.5, fontWeight: "700" },
-    compraMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    compraNotas: { color: T.textoSuave, fontSize: 12, marginTop: 4, lineHeight: 17 },
-    compraTotal: { color: T.turquesa, fontSize: 15.5, fontWeight: "800" },
-    provChips: { flexDirection: "row", gap: 8 },
-    provChip: {
-      paddingHorizontal: 15, height: 38, borderRadius: 19,
-      backgroundColor: T.superficie2, borderWidth: 1, borderColor: T.borde,
-      alignItems: "center", justifyContent: "center",
-    },
-    provChipTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "600" },
-    tipoFila: { flexDirection: "row", gap: 8, marginBottom: 18 },
-    tipoChip: {
-      flex: 1, height: 44, borderRadius: T.radioChico + 2,
-      backgroundColor: T.superficie2, borderWidth: 1, borderColor: T.borde,
-      alignItems: "center", justifyContent: "center",
-    },
-    tipoChipTxt: { color: T.textoSuave, fontSize: 14, fontWeight: "700" },
-  });
 }

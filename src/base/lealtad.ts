@@ -28,6 +28,12 @@ export type Cliente = {
   correo: string | null;
   notas: string | null;
   puntos: number;
+  /** Crédito (cobranza): límite que AVISA, no bloquea — la decisión es del
+   *  cajero/dueño (ver src/base/credito.ts). limite = 0 significa "sin
+   *  límite definido". Estos dos campos no se tocan en crearCliente() ni
+   *  editarCliente(): nacen en 0 y solo credito.ts los modifica. */
+  limite_credito_centavos: number;
+  saldo_centavos: number;
   creado_en: string;
 };
 
@@ -121,7 +127,10 @@ export async function crearCliente(
     correo: correoOk, codigo, notas: null,
     creado_en: ahora, actualizado_en: ahora, eliminado: 0,
   });
-  return { id, codigo, nombre: nombreLimpio, telefono: telefono?.trim() || null, correo: correoOk, notas: null, puntos: 0, creado_en: ahora };
+  return {
+    id, codigo, nombre: nombreLimpio, telefono: telefono?.trim() || null, correo: correoOk,
+    notas: null, puntos: 0, limite_credito_centavos: 0, saldo_centavos: 0, creado_en: ahora,
+  };
 }
 
 export async function editarCliente(
@@ -166,13 +175,13 @@ export async function buscarClientes(texto: string): Promise<Cliente[]> {
   const q = texto.trim().toLowerCase();
   if (!q) {
     return db.getAllAsync<Cliente>(
-      `SELECT id, codigo, nombre, telefono, correo, notas, puntos, creado_en
+      `SELECT id, codigo, nombre, telefono, correo, notas, puntos, limite_credito_centavos, saldo_centavos, creado_en
        FROM clientes WHERE eliminado = 0 ORDER BY nombre COLLATE NOCASE`
     );
   }
   const like = `%${q}%`;
   return db.getAllAsync<Cliente>(
-    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, creado_en
+    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, limite_credito_centavos, saldo_centavos, creado_en
      FROM clientes
      WHERE eliminado = 0 AND (
        lower(nombre) LIKE ? OR lower(COALESCE(telefono,'')) LIKE ?
@@ -186,7 +195,7 @@ export async function buscarClientes(texto: string): Promise<Cliente[]> {
 export async function clientePorId(id: string): Promise<Cliente | null> {
   const db = await bd();
   const c = await db.getFirstAsync<Cliente>(
-    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, creado_en
+    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, limite_credito_centavos, saldo_centavos, creado_en
      FROM clientes WHERE id = ? AND eliminado = 0`,
     [id]
   );
@@ -197,7 +206,7 @@ export async function clientePorId(id: string): Promise<Cliente | null> {
 export async function clientePorCodigo(codigo: string): Promise<Cliente | null> {
   const db = await bd();
   const c = await db.getFirstAsync<Cliente>(
-    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, creado_en
+    `SELECT id, codigo, nombre, telefono, correo, notas, puntos, limite_credito_centavos, saldo_centavos, creado_en
      FROM clientes WHERE codigo = ? AND eliminado = 0`,
     [normalizarCodigoCliente(codigo)]
   );

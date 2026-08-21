@@ -5,6 +5,13 @@
 // que ya cambiaron de fecha dos veces.
 //
 // LOCAL-ONLY (v1).
+//
+// producto_id — AÑADIDO para Recetas: cuando una receta se manda al
+// catálogo (recetas.ts::crearProductoDesdeReceta), genera un perfil de
+// etiqueta automático VINCULADO a ese producto (mismo comportamiento que
+// ya tenía el PC — recetas.rs, crear_producto_desde_receta). Nullable: los
+// perfiles capturados a mano, sin pasar por una receta, no tienen producto
+// vinculado y siguen funcionando igual que antes.
 
 import { bd, uuid, ahoraISO } from "./db";
 
@@ -31,6 +38,9 @@ export type PerfilEtiqueta = {
   /** Tipo de receta: define qué tan seguro es sugerir bajar un ingrediente
    *  sin arriesgar la conservación del producto (ver sustituciones.ts). */
   categoria_receta: string;
+  /** Producto de venta vinculado, si este perfil nació de una receta
+   *  mandada al catálogo. NULL para perfiles capturados a mano. */
+  producto_id: string | null;
   denominacion: string | null;
   marca: string | null;
   ingredientes: string | null;
@@ -56,6 +66,7 @@ export const PERFIL_VACIO: Omit<PerfilEtiqueta, "id" | "actualizado_en"> = {
   contiene_cafeina: 0, contiene_edulcorantes: 0,
   exencion: "ninguna", area_cm2: 0,
   categoria_receta: "otro",
+  producto_id: null,
   denominacion: null, marca: null, ingredientes: null, alergenos: null,
   contenido_neto: null, porcion: null, porciones_envase: null,
   responsable_nombre: null, responsable_domicilio: null, lote: null,
@@ -65,9 +76,9 @@ export const PERFIL_VACIO: Omit<PerfilEtiqueta, "id" | "actualizado_en"> = {
 const COLS = `id, nombre, tipo, calorias_kcal, azucares_g, grasas_saturadas_g,
   grasas_trans_g, sodio_mg, proteinas_g, carbohidratos_g, grasas_totales_g, fibra_g,
   anade_azucares, anade_grasas, anade_sodio, contiene_cafeina, contiene_edulcorantes,
-  exencion, area_cm2, categoria_receta, denominacion, marca, ingredientes, alergenos, contenido_neto,
-  porcion, porciones_envase, responsable_nombre, responsable_domicilio, lote,
-  caducidad, conservacion, pais_origen, notas, actualizado_en`;
+  exencion, area_cm2, categoria_receta, producto_id, denominacion, marca, ingredientes,
+  alergenos, contenido_neto, porcion, porciones_envase, responsable_nombre,
+  responsable_domicilio, lote, caducidad, conservacion, pais_origen, notas, actualizado_en`;
 
 export async function listarPerfiles(): Promise<PerfilEtiqueta[]> {
   const db = await bd();
@@ -104,6 +115,7 @@ export async function guardarPerfil(p: Partial<PerfilEtiqueta>): Promise<string>
     p.contiene_cafeina ? 1 : 0, p.contiene_edulcorantes ? 1 : 0,
     (p.exencion ?? "ninguna").trim() || "ninguna", n(p.area_cm2),
     (p.categoria_receta ?? "otro").trim() || "otro",
+    p.producto_id ?? null,
     lim(p.denominacion), lim(p.marca), lim(p.ingredientes), lim(p.alergenos),
     lim(p.contenido_neto), lim(p.porcion), lim(p.porciones_envase),
     lim(p.responsable_nombre), lim(p.responsable_domicilio), lim(p.lote),
@@ -117,9 +129,10 @@ export async function guardarPerfil(p: Partial<PerfilEtiqueta>): Promise<string>
         (id, nombre, tipo, calorias_kcal, azucares_g, grasas_saturadas_g, grasas_trans_g,
          sodio_mg, proteinas_g, carbohidratos_g, grasas_totales_g, fibra_g,
          anade_azucares, anade_grasas, anade_sodio, contiene_cafeina, contiene_edulcorantes,
-         exencion, area_cm2, categoria_receta, denominacion, marca, ingredientes, alergenos, contenido_neto,
-         porcion, porciones_envase, responsable_nombre, responsable_domicilio, lote,
-         caducidad, conservacion, pais_origen, notas, eliminado, creado_en, actualizado_en)
+         exencion, area_cm2, categoria_receta, producto_id, denominacion, marca, ingredientes,
+         alergenos, contenido_neto, porcion, porciones_envase, responsable_nombre,
+         responsable_domicilio, lote, caducidad, conservacion, pais_origen, notas,
+         eliminado, creado_en, actualizado_en)
        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,?)`,
       [id, ...vals, ts]
     );
@@ -129,10 +142,10 @@ export async function guardarPerfil(p: Partial<PerfilEtiqueta>): Promise<string>
          nombre=?, tipo=?, calorias_kcal=?, azucares_g=?, grasas_saturadas_g=?,
          grasas_trans_g=?, sodio_mg=?, proteinas_g=?, carbohidratos_g=?, grasas_totales_g=?,
          fibra_g=?, anade_azucares=?, anade_grasas=?, anade_sodio=?, contiene_cafeina=?,
-         contiene_edulcorantes=?, exencion=?, area_cm2=?, categoria_receta=?, denominacion=?, marca=?,
-         ingredientes=?, alergenos=?, contenido_neto=?, porcion=?, porciones_envase=?,
-         responsable_nombre=?, responsable_domicilio=?, lote=?, caducidad=?, conservacion=?,
-         pais_origen=?, notas=?, actualizado_en=?
+         contiene_edulcorantes=?, exencion=?, area_cm2=?, categoria_receta=?, producto_id=?,
+         denominacion=?, marca=?, ingredientes=?, alergenos=?, contenido_neto=?, porcion=?,
+         porciones_envase=?, responsable_nombre=?, responsable_domicilio=?, lote=?,
+         caducidad=?, conservacion=?, pais_origen=?, notas=?, actualizado_en=?
        WHERE id = ? AND eliminado = 0`,
       [...vals, id]
     );

@@ -12,18 +12,43 @@
 // Al terminar: guarda nombre del negocio y giro, crea el usuario dueño,
 // siembra los departamentos sugeridos si el inventario está vacío, guarda
 // el modo y entra a la app.
+//
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// Esta es la primera pantalla que ve cualquier persona que instala la app —
+// donde más importa que se sienta terminada. Por eso, a diferencia de
+// ModalTienda (donde el tamaño hacía preferible una corrección quirúrgica),
+// aquí sí se re-vistió por completo con las primitivas del sistema
+// (Boton, Campo, Txt, Banner), igual que FormularioProducto y ModalLealtad.
+//
+//   1. T.turquesa en el wordmark ("Yvex[POS]") y en "Mostrar/Ocultar PIN"
+//      -> T.acento. El morado fantasma de siempre.
+//   2. El botón principal usaba T.acento crudo como fondo -> T.acentoRelleno,
+//      el mismo bug de contraste con acentos claros que ya se corrigió en
+//      toda la app.
+//   3. BackHandler para el wizard: antes, presionar Atrás de Android en
+//      CUALQUIER paso salía del onboarding completo, no retrocedía un
+//      paso. En la primera experiencia de la app, perder todo el progreso
+//      así — el nombre del negocio, el giro, el PIN ya escrito — se siente
+//      pésimo. Ahora Atrás hace lo mismo que la flecha de la barra
+//      superior; solo en el paso 1 se deja el comportamiento por defecto.
+//
+// Lo que NO se tocó, y por qué: el check ✓ del selector de acento (paso 6)
+// ya usaba T.acentoTexto en vez de blanco fijo — el patrón CORRECTO que
+// tuvo que corregirse en ModalTienda. Aquí ya estaba bien resuelto desde
+// antes.
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import {
   View,
   Text,
   TextInput,
   Pressable,
   ScrollView,
-  StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  ActivityIndicator,
+  BackHandler,
 } from "react-native";
 import Animated, {
   useSharedValue,
@@ -36,7 +61,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { router } from "expo-router";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { IconoUI, IdUI } from "@/src/componentes/iconos";
-import { TEMAS, ACENTOS, construirTema } from "@/src/base/apariencia";
+import { TEMAS, ACENTOS } from "@/src/base/apariencia";
 import { MODOS, ModoUso, guardarModoUso, marcarOnboardingHecho } from "@/src/base/modoUso";
 import { GIROS, Giro, guardarGiro, guardarNombreNegocio } from "@/src/base/giro";
 import { crearUsuario, activarUsuario, setPedirPin } from "@/src/base/usuarios";
@@ -44,6 +69,7 @@ import { estadoCuenta } from "@/src/base/nube";
 import { listarProductos, listarCategorias, crearCategoria } from "@/src/base/inventario";
 import ModalCuenta from "@/src/componentes/ModalCuenta";
 import MuestraTema from "@/src/componentes/MuestraTema";
+import { Boton, Banner, Campo, Txt, useEstiloInput } from "@/src/componentes/ui";
 
 const ICONO_MODO: Record<ModoUso, IdUI> = {
   pos: "vender",
@@ -60,14 +86,11 @@ const COLORES_DEPTO = [
 
 const TOTAL_PASOS = 7;
 
-type TemaT = ReturnType<typeof construirTema>;
-type EstilosT = ReturnType<typeof crearEstilos>;
-
 // --- Animaciones del wizard (shared values controlados, sin layout anims) ---
 
 /** Entrada suave de cada paso: fade + desplazamiento de 20px (~200ms).
  *  Se usa con key={paso}, así se remonta y anima en cada cambio de paso. */
-function PasoAnimado({ children }: { children: React.ReactNode }) {
+function PasoAnimado({ children }: { children: ReactNode }) {
   const op = useSharedValue(0);
   const dy = useSharedValue(20);
   useEffect(() => {
@@ -87,15 +110,12 @@ function TarjetaGiro({
   g,
   activo,
   onElegir,
-  T,
-  est,
 }: {
   g: Giro;
   activo: boolean;
   onElegir: () => void;
-  T: TemaT;
-  est: EstilosT;
 }) {
+  const { tema: T } = useTema();
   const escala = useSharedValue(1);
   const st = useAnimatedStyle(() => ({ transform: [{ scale: escala.value }] }));
   function presionar() {
@@ -106,28 +126,55 @@ function TarjetaGiro({
     onElegir();
   }
   return (
-    <Pressable onPress={presionar} style={[est.giroTarjeta, activo && est.tarjetaActiva]}>
+    <Pressable
+      onPress={presionar}
+      style={{
+        width: "47.5%",
+        backgroundColor: T.superficie,
+        borderWidth: 1.5,
+        borderColor: activo ? T.acento : T.borde,
+        borderRadius: T.radioGrande,
+        padding: T.esps.lg,
+        ...(activo ? { backgroundColor: T.acentoSuave } : null),
+      }}
+    >
       <Animated.View style={st}>
         <View
-          style={[
-            est.giroIcono,
-            activo && { borderColor: T.acento, backgroundColor: T.acentoSuave },
-          ]}
+          style={{
+            width: 52,
+            height: 52,
+            borderRadius: 15,
+            borderWidth: 1,
+            borderColor: activo ? T.acento : T.bordeFuerte,
+            backgroundColor: activo ? T.acentoSuave : T.superficie2,
+            alignItems: "center",
+            justifyContent: "center",
+            marginBottom: T.esps.md,
+          }}
         >
           <IconoUI id={g.icono} size={26} color={activo ? T.acento : T.textoSuave} />
         </View>
-        <Text style={est.giroNombre}>{g.nombre}</Text>
+        <Txt escala="pie" fuerte>{g.nombre}</Txt>
         {/* Texto COMPLETO: la tarjeta crece en altura lo que necesite */}
-        <Text style={est.giroFrase}>{g.frase}</Text>
+        <Txt escala="micro" tono="tenue" estilo={{ marginTop: 4 }}>{g.frase}</Txt>
       </Animated.View>
-      {activo && <Text style={est.giroPaloma}>✓</Text>}
+      {activo && (
+        <Txt
+          escala="pie"
+          fuerte
+          tono="acento"
+          estilo={{ position: "absolute", top: 12, right: 14 }}
+        >
+          ✓
+        </Txt>
+      )}
     </Pressable>
   );
 }
 
 export default function OnboardingScreen() {
   const { tema: T, prefs, setTema, setAcento } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
+  const estiloInput = useEstiloInput();
 
   const [paso, setPaso] = useState(1);
   const [nombreNegocio, setNombreNegocio] = useState("");
@@ -143,14 +190,6 @@ export default function OnboardingScreen() {
   const [creando, setCreando] = useState(false);
   const [errorFinal, setErrorFinal] = useState("");
   const [cuentaAbierta, setCuentaAbierta] = useState(false);
-
-  // Scale sutil del botón principal al presionar (0.97 con resorte al soltar).
-  const escalaBtn = useSharedValue(1);
-  const estBtnAnim = useAnimatedStyle(() => ({
-    transform: [{ scale: escalaBtn.value }],
-  }));
-  const btnAbajo = () => { escalaBtn.value = withTiming(0.97, { duration: 90 }); };
-  const btnArriba = () => { escalaBtn.value = withSpring(1, { damping: 14, stiffness: 300 }); };
 
   // Nombre que usan los textos a partir del paso 3 (con su default cálido).
   const negocio = nombreNegocio.trim() === "" ? "Mi negocio" : nombreNegocio.trim();
@@ -178,6 +217,28 @@ export default function OnboardingScreen() {
     if (paso === 5 && !validarUsuario()) return;
     if (paso < TOTAL_PASOS) setPaso(paso + 1);
   }
+
+  function retroceder() {
+    if (paso > 1) setPaso(paso - 1);
+  }
+
+  // Atrás del sistema: retrocede un paso del wizard, igual que la flecha de
+  // la barra superior. Sin esto, Atrás de Android salía del onboarding
+  // completo desde cualquier paso — en la primera experiencia de la app,
+  // perder todo lo ya escrito así se siente pésimo. Solo en el paso 1 se
+  // deja el comportamiento por defecto (nada que retroceder).
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (paso > 1) {
+        retroceder();
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paso]);
 
   /** Siembra los departamentos sugeridos del giro SOLO si el inventario está
    *  vacío (instalación nueva). Nunca pisa trabajo ya hecho. */
@@ -234,61 +295,76 @@ export default function OnboardingScreen() {
     (paso === 5 && (!nombre.trim() || pin.length < 4 || pin2.length < 4));
 
   return (
-    <SafeAreaView style={est.raiz} edges={["top", "bottom"]}>
+    <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }} edges={["top", "bottom"]}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === "ios" ? "padding" : undefined}
       >
         {/* Progreso + atrás */}
-        <View style={est.barra}>
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            paddingHorizontal: T.esp,
+            paddingTop: 10,
+            paddingBottom: 4,
+          }}
+        >
           {paso > 1 ? (
-            <Pressable onPress={() => setPaso(paso - 1)} hitSlop={12} style={est.atrasBtn}>
+            <Pressable onPress={retroceder} hitSlop={12} style={{ width: 36, height: 36, justifyContent: "center" }}>
               <IconoUI id="atras" size={20} color={T.textoSuave} />
             </Pressable>
           ) : (
-            <View style={est.atrasBtn} />
+            <View style={{ width: 36, height: 36 }} />
           )}
-          <View style={est.puntos}>
+          <View style={{ flex: 1, flexDirection: "row", justifyContent: "center", gap: 8 }}>
             {Array.from({ length: TOTAL_PASOS }, (_, i) => (
               <View
                 key={i}
-                style={[est.punto, i + 1 <= paso && { backgroundColor: T.acento }]}
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: 4,
+                  backgroundColor: i + 1 <= paso ? T.acento : T.superficie3,
+                }}
               />
             ))}
           </View>
-          <View style={est.atrasBtn} />
+          <View style={{ width: 36, height: 36 }} />
         </View>
 
         <ScrollView
-          contentContainerStyle={est.cuerpo}
+          contentContainerStyle={{ padding: T.esp, paddingTop: T.esps.xxl, paddingBottom: T.esps.md, flexGrow: 1 }}
           keyboardShouldPersistTaps="handled"
           showsVerticalScrollIndicator={false}
         >
           {/* Al cambiar de paso este bloque se remonta y entra suave */}
           <PasoAnimado key={paso}>
           {paso === 1 && (
-            <View style={est.centrado}>
-              <Text style={est.marca}>
-                Yvex<Text style={{ color: T.turquesa }}>POS</Text>
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 30 }}>
+              <Text style={{ color: T.texto, fontSize: 46, fontWeight: "900", letterSpacing: -1.5 }}>
+                Yvex<Text style={{ color: T.acento }}>POS</Text>
               </Text>
-              <Text style={est.frase}>Qué gusto tenerte por aquí</Text>
-              <Text style={est.subfrase}>
+              <Txt escala="titulo" fuerte estilo={{ marginTop: T.esps.lg, textAlign: "center" }}>
+                Qué gusto tenerte por aquí
+              </Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.md, textAlign: "center", paddingHorizontal: 12 }}>
                 En unos minutos tu negocio va a vender, cuidar su inventario y
                 ver cómo va el día, todo desde este dispositivo. Vamos paso a
                 paso, sin prisa.
-              </Text>
+              </Txt>
             </View>
           )}
 
           {paso === 2 && (
             <View>
-              <Text style={est.titulo}>¿Cómo se llama tu negocio?</Text>
-              <Text style={est.subtitulo}>
+              <Txt escala="protagonista" fuerte>¿Cómo se llama tu negocio?</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.sm, marginBottom: T.esps.xl }}>
                 Así lo verás en la pantalla de inicio. Si lo dejas vacío, le
                 diremos "Mi negocio" con mucho cariño.
-              </Text>
+              </Txt>
               <TextInput
-                style={est.inputGrande}
+                style={[estiloInput, { fontSize: 21, fontWeight: "700", paddingVertical: T.esps.lg }]}
                 value={nombreNegocio}
                 onChangeText={setNombreNegocio}
                 placeholder="Ej. Abarrotes Lupita"
@@ -301,21 +377,19 @@ export default function OnboardingScreen() {
 
           {paso === 3 && (
             <View>
-              <Text style={est.titulo}>¿Qué vende {negocio}?</Text>
-              <Text style={est.subtitulo}>
+              <Txt escala="protagonista" fuerte>¿Qué vende {negocio}?</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.sm, marginBottom: T.esps.xl }}>
                 Elige el giro que más se parezca. Con eso te sugerimos
                 departamentos y te contamos qué partes de la app te van a
                 servir más.
-              </Text>
-              <View style={est.giroGrid}>
+              </Txt>
+              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.md, alignItems: "flex-start" }}>
                 {GIROS.map((g) => (
                   <TarjetaGiro
                     key={g.id}
                     g={g}
                     activo={giro?.id === g.id}
                     onElegir={() => setGiro(g)}
-                    T={T}
-                    est={est}
                   />
                 ))}
               </View>
@@ -324,25 +398,44 @@ export default function OnboardingScreen() {
 
           {paso === 4 && (
             <View>
-              <Text style={est.titulo}>¿Para qué lo vas a usar?</Text>
-              <Text style={est.subtitulo}>Puedes cambiarlo después en Ajustes.</Text>
+              <Txt escala="protagonista" fuerte>¿Para qué lo vas a usar?</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.sm, marginBottom: T.esps.xl }}>
+                Puedes cambiarlo después en Ajustes.
+              </Txt>
               {MODOS.map((m) => {
                 const activo = modo === m.id;
                 return (
                   <Pressable
                     key={m.id}
                     onPress={() => setModo(m.id)}
-                    style={[est.tarjeta, activo && est.tarjetaActiva]}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: T.esps.lg,
+                      backgroundColor: activo ? T.acentoSuave : T.superficie,
+                      borderWidth: 1.5,
+                      borderColor: activo ? T.acento : T.borde,
+                      borderRadius: T.radioGrande,
+                      padding: T.esps.lg,
+                      marginBottom: T.esps.md,
+                    }}
                   >
-                    <View style={[est.tarjetaIcono, activo && { borderColor: T.acento, backgroundColor: T.acentoSuave }]}>
+                    <View
+                      style={{
+                        width: 48, height: 48, borderRadius: 14, borderWidth: 1,
+                        borderColor: activo ? T.acento : T.bordeFuerte,
+                        backgroundColor: activo ? T.acentoSuave : T.superficie2,
+                        alignItems: "center", justifyContent: "center",
+                      }}
+                    >
                       <IconoUI id={ICONO_MODO[m.id]} size={24} color={activo ? T.acento : T.textoSuave} />
                     </View>
                     <View style={{ flex: 1 }}>
-                      <Text style={est.tarjetaNombre}>{m.nombre}</Text>
-                      <Text style={est.tarjetaDesc}>{m.desc}</Text>
-                      <Text style={est.tarjetaEj}>{m.ejemplo}</Text>
+                      <Txt escala="cuerpo" fuerte>{m.nombre}</Txt>
+                      <Txt escala="pie" tono="suave" estilo={{ marginTop: 2 }}>{m.desc}</Txt>
+                      <Txt escala="micro" tono="tenue" estilo={{ marginTop: 5 }}>{m.ejemplo}</Txt>
                     </View>
-                    {activo && <Text style={est.paloma}>✓</Text>}
+                    {activo && <Txt escala="cuerpo" fuerte tono="acento">✓</Txt>}
                   </Pressable>
                 );
               })}
@@ -351,66 +444,69 @@ export default function OnboardingScreen() {
 
           {paso === 5 && (
             <View>
-              <Text style={est.titulo}>Tu usuario</Text>
-              <Text style={est.subtitulo}>
+              <Txt escala="protagonista" fuerte>Tu usuario</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.sm, marginBottom: T.esps.xl }}>
                 Perfecto, {negocio} ya casi está listo. Ahora, ¿quién eres tú?
                 El PIN es tuyo, lo eliges tú. Lo pedirá la app si varias
                 personas usan este dispositivo. No hay PIN por defecto: si lo
                 olvidas, otro dueño puede cambiarlo desde Ajustes.
-              </Text>
+              </Txt>
 
-              <Text style={est.label}>NOMBRE</Text>
-              <TextInput
-                style={est.input}
-                value={nombre}
-                onChangeText={setNombre}
-                placeholder="Tu nombre"
-                placeholderTextColor={T.textoTenue}
-                autoCapitalize="words"
-              />
+              <Campo label="Nombre">
+                <TextInput
+                  style={estiloInput}
+                  value={nombre}
+                  onChangeText={setNombre}
+                  placeholder="Tu nombre"
+                  placeholderTextColor={T.textoTenue}
+                  autoCapitalize="words"
+                />
+              </Campo>
 
-              <Text style={est.label}>PIN DE 4 DÍGITOS</Text>
-              <TextInput
-                style={est.input}
-                value={pin}
-                onChangeText={(v) => setPin(v.replace(/\D/g, "").slice(0, 4))}
-                placeholder="••••"
-                placeholderTextColor={T.textoTenue}
-                keyboardType="number-pad"
-                maxLength={4}
-                secureTextEntry={!verPin}
-              />
+              <Campo label="PIN de 4 dígitos">
+                <TextInput
+                  style={estiloInput}
+                  value={pin}
+                  onChangeText={(v) => setPin(v.replace(/\D/g, "").slice(0, 4))}
+                  placeholder="••••"
+                  placeholderTextColor={T.textoTenue}
+                  keyboardType="number-pad"
+                  maxLength={4}
+                  secureTextEntry={!verPin}
+                />
+              </Campo>
 
-              <Text style={est.label}>CONFIRMA TU PIN</Text>
-              <TextInput
-                style={est.input}
-                value={pin2}
-                onChangeText={(v) => setPin2(v.replace(/\D/g, "").slice(0, 4))}
-                placeholder="••••"
-                placeholderTextColor={T.textoTenue}
-                keyboardType="number-pad"
-                maxLength={4}
-                secureTextEntry={!verPin}
-              />
+              <Campo label="Confirma tu PIN">
+                <TextInput
+                  style={estiloInput}
+                  value={pin2}
+                  onChangeText={(v) => setPin2(v.replace(/\D/g, "").slice(0, 4))}
+                  placeholder="••••"
+                  placeholderTextColor={T.textoTenue}
+                  keyboardType="number-pad"
+                  maxLength={4}
+                  secureTextEntry={!verPin}
+                />
+              </Campo>
 
-              <Pressable onPress={() => setVerPin(!verPin)} hitSlop={8} style={est.verPin}>
-                <Text style={est.verPinTxt}>{verPin ? "Ocultar PIN" : "Mostrar PIN"}</Text>
+              <Pressable
+                onPress={() => setVerPin(!verPin)}
+                hitSlop={8}
+                style={{ alignSelf: "flex-end", marginTop: -6, marginBottom: T.esps.md }}
+              >
+                <Txt escala="pie" fuerte tono="acento">{verPin ? "Ocultar PIN" : "Mostrar PIN"}</Txt>
               </Pressable>
 
-              {errorUsuario !== "" && (
-                <View style={est.errorCaja}>
-                  <Text style={est.errorTxt}>{errorUsuario}</Text>
-                </View>
-              )}
+              <Banner texto={errorUsuario} tipo="error" />
             </View>
           )}
 
           {paso === 6 && (
             <View>
-              <Text style={est.titulo}>Apariencia</Text>
-              <Text style={est.subtitulo}>
+              <Txt escala="protagonista" fuerte>Apariencia</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.sm, marginBottom: T.esps.xl }}>
                 Elige cómo se ve tu app. Lo que toques se aplica al momento.
-              </Text>
+              </Txt>
 
               {TEMAS.map((t) => {
                 const activo = prefs.tema === t.id;
@@ -418,31 +514,55 @@ export default function OnboardingScreen() {
                   <Pressable
                     key={t.id}
                     onPress={() => setTema(t.id)}
-                    style={[est.temaFila, activo && est.tarjetaActiva]}
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: T.esps.lg,
+                      backgroundColor: activo ? T.acentoSuave : T.superficie,
+                      borderWidth: 1.5,
+                      borderColor: activo ? T.acento : T.borde,
+                      borderRadius: T.radio,
+                      padding: T.esps.lg,
+                      marginBottom: T.esps.md,
+                    }}
                   >
                     {/* Mini-mock de la app con la paleta del tema y el acento ACTIVO */}
                     <MuestraTema paleta={t.paleta} acentoColor={T.acento} esClaro={t.esClaro} />
                     <View style={{ flex: 1 }}>
-                      <Text style={est.tarjetaNombre}>{t.nombre}</Text>
-                      <Text style={est.tarjetaEj}>{t.desc}</Text>
+                      <Txt escala="cuerpo" fuerte>{t.nombre}</Txt>
+                      <Txt escala="micro" tono="tenue" estilo={{ marginTop: 5 }}>{t.desc}</Txt>
                     </View>
-                    {activo && <Text style={est.paloma}>✓</Text>}
+                    {activo && <Txt escala="cuerpo" fuerte tono="acento">✓</Txt>}
                   </Pressable>
                 );
               })}
 
-              <Text style={[est.label, { marginTop: 18 }]}>COLOR DE ACENTO</Text>
-              <View style={est.acentos}>
+              <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginTop: T.esps.lg, marginBottom: T.esps.sm }}>
+                Color de acento
+              </Txt>
+              <View style={{ flexDirection: "row", gap: T.esps.lg, flexWrap: "wrap", marginTop: 4 }}>
                 {ACENTOS.map((a) => {
                   const activo = prefs.acento === a.id;
                   return (
                     <Pressable
                       key={a.id}
                       onPress={() => setAcento(a.id)}
-                      style={[est.acentoCirculo, { backgroundColor: a.color }, activo && est.acentoActivo]}
+                      style={{
+                        width: 40, height: 40, borderRadius: 20,
+                        backgroundColor: a.color,
+                        alignItems: "center", justifyContent: "center",
+                        borderWidth: activo ? 3 : 0,
+                        borderColor: T.texto,
+                      }}
                       accessibilityLabel={a.nombre}
                     >
-                      {activo && <Text style={est.acentoPaloma}>✓</Text>}
+                      {/* T.acentoTexto: correcto aquí porque este swatch, cuando
+                          está activo, ES el acento actual — mismo color, mismo
+                          contraste calculado. Es el patrón que ModalTienda tuvo
+                          que adoptar; aquí ya estaba bien. */}
+                      {activo && (
+                        <Txt escala="pie" fuerte estilo={{ color: T.acentoTexto }}>✓</Txt>
+                      )}
                     </Pressable>
                   );
                 })}
@@ -451,83 +571,70 @@ export default function OnboardingScreen() {
           )}
 
           {paso === 7 && (
-            <View style={est.centrado}>
-              <View style={est.nubeIcono}>
+            <View style={{ flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 30 }}>
+              <View
+                style={{
+                  width: 64, height: 64, borderRadius: 18, borderWidth: 1,
+                  borderColor: T.bordeFuerte, backgroundColor: T.superficie2,
+                  alignItems: "center", justifyContent: "center", marginBottom: T.esps.xl,
+                }}
+              >
                 <IconoUI id={giro?.icono ?? "puntos"} size={30} color={T.acento} />
               </View>
-              <Text style={est.tituloCentro}>¡Listo, {negocio}!</Text>
-              <Text style={est.cierreTxt}>
+              <Txt escala="titulo" fuerte estilo={{ textAlign: "center" }}>¡Listo, {negocio}!</Txt>
+              <Txt escala="cuerpo" tono="suave" estilo={{ marginTop: T.esps.md, textAlign: "center", paddingHorizontal: 8 }}>
                 Ya puedes empezar a vender. Mira lo que le va a servir a tu
                 negocio:
-              </Text>
-              <View style={est.sugerenciasCaja}>
+              </Txt>
+              <View style={{ alignSelf: "stretch", marginTop: T.esps.lg, gap: T.esps.sm }}>
                 {(giro?.sugerencias ?? []).map((s, i) => (
-                  <View key={i} style={est.sugerenciaFila}>
-                    <Text style={est.sugerenciaPaloma}>✓</Text>
-                    <Text style={est.sugerenciaTxt}>{s}</Text>
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: "row", alignItems: "flex-start", gap: T.esps.sm,
+                      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
+                      borderRadius: T.radio, padding: T.esps.lg,
+                    }}
+                  >
+                    <Txt escala="pie" fuerte tono="acento" estilo={{ marginTop: 1 }}>✓</Txt>
+                    <Txt escala="pie" tono="suave" estilo={{ flex: 1 }}>{s}</Txt>
                   </View>
                 ))}
               </View>
-              <Text style={est.nubeNota}>
+              <Txt escala="pie" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.lg, paddingHorizontal: 8 }}>
                 La app funciona al 100% sin cuenta. Si quieres respaldo en la
                 nube, vincula tu cuenta abajo o después en Ajustes.
-              </Text>
+              </Txt>
             </View>
           )}
 
-          {errorFinal !== "" && (
-            <View style={est.errorCaja}>
-              <Text style={est.errorTxt}>{errorFinal}</Text>
-            </View>
-          )}
+          <Banner texto={errorFinal} tipo="error" />
           </PasoAnimado>
         </ScrollView>
 
         {/* Botón inferior */}
-        <View style={est.pie}>
+        <View style={{ padding: T.esp, paddingTop: T.esps.sm }}>
           {paso < TOTAL_PASOS ? (
-            <Animated.View style={estBtnAnim}>
-              <Pressable
-                onPress={continuar}
-                onPressIn={btnAbajo}
-                onPressOut={btnArriba}
-                disabled={botonDeshabilitado}
-                style={({ pressed }) => [
-                  est.boton,
-                  botonDeshabilitado && { opacity: 0.4 },
-                  pressed && !botonDeshabilitado && { opacity: 0.85 },
-                ]}
-              >
-                <Text style={est.botonTxt}>{paso === 1 ? "Empezar" : "Continuar"}</Text>
-              </Pressable>
-            </Animated.View>
+            <Boton
+              titulo={paso === 1 ? "Empezar" : "Continuar"}
+              onPress={continuar}
+              deshabilitado={botonDeshabilitado}
+            />
           ) : (
             <View>
-              <Animated.View style={estBtnAnim}>
-                <Pressable
-                  onPress={terminar}
-                  onPressIn={btnAbajo}
-                  onPressOut={btnArriba}
-                  disabled={creando}
-                  style={({ pressed }) => [est.boton, pressed && !creando && { opacity: 0.85 }]}
-                >
-                  {creando ? (
-                    <ActivityIndicator color={T.acentoTexto} size="small" />
-                  ) : (
-                    <Text style={est.botonTxt}>Empezar a usar YvexPOS</Text>
-                  )}
-                </Pressable>
-              </Animated.View>
-              <Pressable
-                onPress={() => setCuentaAbierta(true)}
-                disabled={creando}
-                style={({ pressed }) => [
-                  est.botonSecundario,
-                  pressed && !creando && { backgroundColor: T.superficie3 },
-                ]}
-              >
-                <Text style={est.botonSecundarioTxt}>Iniciar sesión o crear cuenta</Text>
-              </Pressable>
+              <Boton
+                titulo="Empezar a usar YvexPOS"
+                onPress={terminar}
+                cargando={creando}
+              />
+              <View style={{ marginTop: T.esps.sm }}>
+                <Boton
+                  titulo="Iniciar sesión o crear cuenta"
+                  tipo="secundario"
+                  onPress={() => setCuentaAbierta(true)}
+                  deshabilitado={creando}
+                />
+              </View>
             </View>
           )}
         </View>
@@ -539,251 +646,4 @@ export default function OnboardingScreen() {
       )}
     </SafeAreaView>
   );
-}
-
-// Los estilos se construyen con el tema ACTIVO (useTema): el paso de
-// apariencia se ve reflejado en el wizard mismo, en vivo.
-function crearEstilos(T: ReturnType<typeof construirTema>) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-
-    barra: {
-      flexDirection: "row",
-      alignItems: "center",
-      paddingHorizontal: T.esp,
-      paddingTop: 10,
-      paddingBottom: 4,
-    },
-    atrasBtn: { width: 36, height: 36, justifyContent: "center" },
-    puntos: { flex: 1, flexDirection: "row", justifyContent: "center", gap: 8 },
-    punto: {
-      width: 8,
-      height: 8,
-      borderRadius: 4,
-      backgroundColor: T.superficie3,
-    },
-
-    cuerpo: { padding: T.esp, paddingTop: 26, paddingBottom: 10, flexGrow: 1 },
-
-    centrado: { flex: 1, justifyContent: "center", alignItems: "center", paddingBottom: 30 },
-    marca: { color: T.texto, fontSize: 46, fontWeight: "900", letterSpacing: -1.5 },
-    frase: {
-      color: T.texto,
-      fontSize: 20,
-      fontWeight: "700",
-      marginTop: 14,
-      textAlign: "center",
-      letterSpacing: -0.3,
-    },
-    subfrase: {
-      color: T.textoSuave,
-      fontSize: 15,
-      lineHeight: 23,
-      marginTop: 12,
-      textAlign: "center",
-      paddingHorizontal: 12,
-    },
-
-    titulo: { color: T.texto, fontSize: 28, fontWeight: "800", letterSpacing: -0.7 },
-    tituloCentro: { color: T.texto, fontSize: 26, fontWeight: "800", letterSpacing: -0.7, textAlign: "center" },
-    subtitulo: { color: T.textoSuave, fontSize: 14.5, lineHeight: 22, marginTop: 8, marginBottom: 22 },
-
-    tarjeta: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 14,
-      backgroundColor: T.superficie,
-      borderWidth: 1.5,
-      borderColor: T.borde,
-      borderRadius: T.radioGrande,
-      padding: 18,
-      marginBottom: 12,
-    },
-    tarjetaActiva: { borderColor: T.acento, backgroundColor: T.acentoSuave },
-    tarjetaIcono: {
-      width: 48,
-      height: 48,
-      borderRadius: 14,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    tarjetaNombre: { color: T.texto, fontSize: 16, fontWeight: "800" },
-    tarjetaDesc: { color: T.textoSuave, fontSize: 13.5, marginTop: 2 },
-    tarjetaEj: { color: T.textoTenue, fontSize: 12.5, lineHeight: 18, marginTop: 5 },
-    paloma: { color: T.acento, fontSize: 17, fontWeight: "900" },
-
-    // Grid de giros (2 columnas; cada tarjeta crece a su altura natural)
-    giroGrid: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      gap: 12,
-      alignItems: "flex-start",
-    },
-    giroTarjeta: {
-      width: "47.5%",
-      backgroundColor: T.superficie,
-      borderWidth: 1.5,
-      borderColor: T.borde,
-      borderRadius: T.radioGrande,
-      padding: 16,
-    },
-    giroIcono: {
-      width: 52,
-      height: 52,
-      borderRadius: 15,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 12,
-    },
-    giroNombre: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    giroFrase: { color: T.textoTenue, fontSize: 12, lineHeight: 17, marginTop: 4 },
-    giroPaloma: {
-      position: "absolute",
-      top: 12,
-      right: 14,
-      color: T.acento,
-      fontSize: 16,
-      fontWeight: "900",
-    },
-
-    label: {
-      color: T.textoSuave,
-      fontSize: 12,
-      fontWeight: "800",
-      letterSpacing: 0.8,
-      marginBottom: 8,
-    },
-    input: {
-      backgroundColor: T.superficie2,
-      borderRadius: T.radioChico,
-      paddingHorizontal: 14,
-      paddingVertical: 13,
-      fontSize: 17,
-      color: T.texto,
-      borderWidth: 1,
-      borderColor: T.borde,
-      marginBottom: 16,
-    },
-    inputGrande: {
-      backgroundColor: T.superficie2,
-      borderRadius: T.radio,
-      paddingHorizontal: 18,
-      paddingVertical: 18,
-      fontSize: 21,
-      fontWeight: "700",
-      color: T.texto,
-      borderWidth: 1.5,
-      borderColor: T.borde,
-      marginBottom: 16,
-    },
-    verPin: { alignSelf: "flex-end", marginTop: -6, marginBottom: 14 },
-    verPinTxt: { color: T.turquesa, fontSize: 13, fontWeight: "800" },
-
-    errorCaja: {
-      backgroundColor: T.peligroSuave,
-      borderWidth: 1,
-      borderColor: T.peligro,
-      borderRadius: T.radioChico,
-      paddingVertical: 11,
-      paddingHorizontal: 14,
-      marginTop: 4,
-    },
-    errorTxt: { color: T.peligroTexto, fontSize: 14, fontWeight: "600" },
-
-    temaFila: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 14,
-      backgroundColor: T.superficie,
-      borderWidth: 1.5,
-      borderColor: T.borde,
-      borderRadius: T.radio,
-      padding: 14,
-      marginBottom: 10,
-    },
-    acentos: { flexDirection: "row", gap: 14, flexWrap: "wrap", marginTop: 4 },
-    acentoCirculo: {
-      width: 40,
-      height: 40,
-      borderRadius: 20,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    acentoActivo: { borderWidth: 3, borderColor: T.texto },
-    acentoPaloma: { color: T.acentoTexto, fontSize: 15, fontWeight: "900" },
-
-    // Cierre personalizado
-    nubeIcono: {
-      width: 64,
-      height: 64,
-      borderRadius: 18,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      alignItems: "center",
-      justifyContent: "center",
-      marginBottom: 20,
-    },
-    cierreTxt: {
-      color: T.textoSuave,
-      fontSize: 15,
-      lineHeight: 23,
-      textAlign: "center",
-      marginTop: 12,
-      paddingHorizontal: 8,
-    },
-    sugerenciasCaja: {
-      alignSelf: "stretch",
-      marginTop: 18,
-      gap: 10,
-    },
-    sugerenciaFila: {
-      flexDirection: "row",
-      alignItems: "flex-start",
-      gap: 10,
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderRadius: T.radio,
-      padding: 14,
-    },
-    sugerenciaPaloma: { color: T.acento, fontSize: 14, fontWeight: "900", marginTop: 1 },
-    sugerenciaTxt: { flex: 1, color: T.textoSuave, fontSize: 13.5, lineHeight: 20 },
-    nubeNota: {
-      color: T.textoTenue,
-      fontSize: 13,
-      textAlign: "center",
-      marginTop: 18,
-      paddingHorizontal: 8,
-    },
-
-    pie: { padding: T.esp, paddingTop: 8 },
-    boton: {
-      backgroundColor: T.acento,
-      borderRadius: T.radioChico + 2,
-      paddingVertical: 16,
-      alignItems: "center",
-      justifyContent: "center",
-      minHeight: 54,
-    },
-    botonTxt: { color: T.acentoTexto, fontSize: 16.5, fontWeight: "800", letterSpacing: 0.2 },
-    botonSecundario: {
-      marginTop: 10,
-      backgroundColor: T.superficie2,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      borderRadius: T.radioChico + 2,
-      paddingVertical: 15,
-      alignItems: "center",
-      justifyContent: "center",
-      minHeight: 52,
-    },
-    botonSecundarioTxt: { color: T.textoSuave, fontSize: 15.5, fontWeight: "700" },
-  });
 }

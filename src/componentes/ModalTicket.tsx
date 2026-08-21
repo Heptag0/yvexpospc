@@ -5,6 +5,24 @@
 // negocio, folio y fecha, tabla de ítems, totales a la derecha y un cierre
 // cálido. Botones: "Compartir" (Share nativo con el recibo en texto plano)
 // y "Listo".
+//
+// ---------------------------------------------------------------------------
+// POR QUÉ ESTE ARCHIVO CONSERVA SU DISEÑO PROPIO
+// ---------------------------------------------------------------------------
+// Esta pantalla es EL momento pico de una venta — el pago acaba de
+// confirmarse, es el "recibo en la mano" del cajero. Forzarla dentro de la
+// cáscara genérica de <Hoja> la habría vuelto una lista más entre las
+// muchas de la app, y es justo lo contrario de lo que este instante merece.
+// El recibo dentado se queda: es la firma visual correcta AQUÍ.
+//
+// Lo que SÍ se corrigió:
+//   1. T.turquesa (color de "Descuento" y "Cambio") -> T.exito. Son cifras
+//      buenas para el cliente — el verde de éxito de la marca, no un
+//      segundo acento que nadie eligió.
+//   2. Los montos ahora usan Plex Mono (T.fuente.numFuerte) con la misma
+//      regla que rige el resto de la app: todo número de dinero pasa por la
+//      fuente tabular, sin excepción — antes solo tenían
+//      `fontVariant:["tabular-nums"]` sin la familia tipográfica real.
 
 import { useMemo } from "react";
 import {
@@ -121,7 +139,7 @@ export default function ModalTicket({
                     etiqueta="Descuento lealtad"
                     valor={-ticket.descuento_centavos}
                     est={est}
-                    verde
+                    bien
                   />
                 )}
                 <Totales etiqueta="Total" valor={ticket.total_centavos} est={est} fuerte />
@@ -135,7 +153,7 @@ export default function ModalTicket({
                   est={est}
                 />
                 {ticket.metodo === "efectivo" && (
-                  <Totales etiqueta="Cambio" valor={ticket.cambio_centavos} est={est} verde />
+                  <Totales etiqueta="Cambio" valor={ticket.cambio_centavos} est={est} bien />
                 )}
 
                 <View style={est.sep} />
@@ -179,13 +197,15 @@ function Totales({
   valor,
   est,
   fuerte,
-  verde,
+  bien,
 }: {
   etiqueta: string;
   valor: number;
   est: any;
   fuerte?: boolean;
-  verde?: boolean;
+  /** Cifra que es buena noticia para el cliente (descuento, cambio):
+   *  antes era T.turquesa (morado fantasma), ahora T.exito. */
+  bien?: boolean;
 }) {
   const { tema: T } = useTema();
   return (
@@ -195,7 +215,7 @@ function Totales({
         style={[
           est.totalVal,
           fuerte && est.totalValFuerte,
-          verde && { color: T.turquesa, fontWeight: "800" },
+          bien && { color: T.exito, fontWeight: "800" },
         ]}
       >
         {pesos(valor)}
@@ -212,7 +232,12 @@ function crearEstilos(T: Tema) {
     shadowOffset: { width: 0, height: 8 },
     elevation: 6,
   };
-  const cifras: TextStyle = { fontVariant: ["tabular-nums"] };
+  // Montos: Plex Mono real, no solo el atributo tabular-nums suelto. Es la
+  // misma regla que rige toda la app — aquí solo se aplicaba a medias.
+  const cifras: TextStyle = {
+    fontVariant: ["tabular-nums"],
+    fontFamily: T.fuente.numFuerte,
+  };
   return StyleSheet.create({
     fondo: {
       flex: 1,
@@ -236,8 +261,9 @@ function crearEstilos(T: Tema) {
     okTxt: { color: T.exito, fontSize: 26, fontWeight: "800" },
     okTitulo: {
       color: T.texto,
-      fontSize: 17,
+      fontSize: T.tipo.titulo,
       fontWeight: "800",
+      fontFamily: T.fuente.uiFuerte,
       marginBottom: 16,
     },
     recibo: { alignSelf: "stretch", ...sombra },
@@ -246,15 +272,17 @@ function crearEstilos(T: Tema) {
       color: T.texto,
       fontSize: 18,
       fontWeight: "900",
+      fontFamily: T.fuente.uiFuerte,
       textAlign: "center",
       letterSpacing: 0.4,
     },
     meta: {
       color: T.textoTenue,
-      fontSize: 12,
+      fontSize: T.tipo.pie,
       textAlign: "center",
       marginTop: 4,
       fontWeight: "600",
+      fontFamily: T.fuente.ui,
     },
     sep: {
       borderTopWidth: 1,
@@ -263,8 +291,13 @@ function crearEstilos(T: Tema) {
       marginVertical: 12,
     },
     linea: { flexDirection: "row", alignItems: "center", marginBottom: 9 },
-    lineaNombre: { color: T.texto, fontSize: 13.5, fontWeight: "700" },
-    lineaMeta: { color: T.textoTenue, fontSize: 11, marginTop: 2, ...cifras },
+    lineaNombre: {
+      color: T.texto,
+      fontSize: 13.5,
+      fontWeight: "700",
+      fontFamily: T.fuente.uiFuerte,
+    },
+    lineaMeta: { color: T.textoTenue, fontSize: T.tipo.micro, marginTop: 2, ...cifras },
     lineaImporte: { color: T.texto, fontSize: 13.5, fontWeight: "800", ...cifras },
     totalFila: {
       flexDirection: "row",
@@ -272,20 +305,32 @@ function crearEstilos(T: Tema) {
       alignItems: "baseline",
       marginBottom: 5,
     },
-    totalEtq: { color: T.textoSuave, fontSize: 12.5, fontWeight: "600" },
-    totalEtqFuerte: { color: T.texto, fontSize: 14, fontWeight: "900" },
+    totalEtq: {
+      color: T.textoSuave,
+      fontSize: 12.5,
+      fontWeight: "600",
+      fontFamily: T.fuente.ui,
+    },
+    totalEtqFuerte: {
+      color: T.texto,
+      fontSize: T.tipo.cuerpo,
+      fontWeight: "900",
+      fontFamily: T.fuente.uiFuerte,
+    },
     totalVal: { color: T.textoSuave, fontSize: 13, fontWeight: "700", ...cifras },
-    totalValFuerte: { color: T.texto, fontSize: 19, fontWeight: "900", ...cifras },
+    totalValFuerte: { color: T.texto, fontSize: T.tipo.titulo, fontWeight: "900", ...cifras },
     despedida: {
       color: T.textoSuave,
-      fontSize: 13,
+      fontSize: T.tipo.pie,
       fontWeight: "700",
+      fontFamily: T.fuente.ui,
       textAlign: "center",
     },
     lealtad: {
       color: T.acento,
       fontSize: 12.5,
       fontWeight: "800",
+      fontFamily: T.fuente.uiFuerte,
       textAlign: "center",
       marginBottom: 8,
     },
@@ -296,11 +341,16 @@ function crearEstilos(T: Tema) {
       gap: 8,
       alignItems: "center",
       justifyContent: "center",
-      backgroundColor: T.acento,
+      backgroundColor: T.acentoRelleno,
       borderRadius: T.radio,
       minHeight: 50,
     },
-    btnCompartirTxt: { color: T.acentoTexto, fontSize: 15, fontWeight: "800" },
+    btnCompartirTxt: {
+      color: T.acentoTexto,
+      fontSize: T.tipo.cuerpo,
+      fontWeight: "800",
+      fontFamily: T.fuente.uiFuerte,
+    },
     btnListo: {
       flex: 1,
       alignItems: "center",
@@ -311,6 +361,11 @@ function crearEstilos(T: Tema) {
       borderRadius: T.radio,
       minHeight: 50,
     },
-    btnListoTxt: { color: T.textoSuave, fontSize: 15, fontWeight: "800" },
+    btnListoTxt: {
+      color: T.textoSuave,
+      fontSize: T.tipo.cuerpo,
+      fontWeight: "800",
+      fontFamily: T.fuente.uiFuerte,
+    },
   });
 }

@@ -2,10 +2,29 @@
 // Envuelve la app con el proveedor de tema: al cambiar el tema en
 // Configuración, toda la interfaz reacciona al instante.
 //
-// Puerta de arranque: antes de mostrar nada se resuelve si toca el
-// onboarding (instalación nueva) o la app (ya configurada). El usuario
-// nuevo no ve las pestañas hasta terminar; el existente nunca ve el
-// asistente.
+// Puerta de arranque: antes de mostrar nada se resuelve (a) si las fuentes de
+// marca ya cargaron y (b) si toca el onboarding (instalación nueva) o la app
+// (ya configurada). El usuario nuevo no ve las pestañas hasta terminar; el
+// existente nunca ve el asistente.
+//
+// ---------------------------------------------------------------------------
+// FUENTES DE MARCA
+// ---------------------------------------------------------------------------
+// Dos familias con roles que NO se mezclan:
+//   · Archivo       → toda la interfaz.
+//   · IBM Plex Mono → EXCLUSIVO para cifras de dinero, con numeral tabular.
+//
+// Se cargan aquí, una sola vez, y se esperan antes de pintar: si se pintara
+// antes, la app arrancaría con la fuente del sistema y saltaría de golpe al
+// terminar la carga — el clásico destello que delata a una app sin terminar.
+//
+// Los pesos que se cargan son EXACTAMENTE los que usa el sistema de diseño
+// (500 y 700, ver PESO en src/base/apariencia.ts). Cargar más pesos "por si
+// acaso" solo engorda el arranque.
+//
+// Si algún día hay que revertir esto: poner FUENTES_CARGADAS = false en
+// src/base/apariencia.ts y la app vuelve a la fuente del sistema sin tocar
+// ninguna pantalla.
 
 import { useEffect, useState } from "react";
 import { DarkTheme, DefaultTheme, ThemeProvider } from "@react-navigation/native";
@@ -14,9 +33,14 @@ import { StatusBar } from "expo-status-bar";
 import { Text, View } from "react-native";
 import "react-native-reanimated";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { useFonts } from "expo-font";
+import { Archivo_500Medium, Archivo_700Bold } from "@expo-google-fonts/archivo";
+import {
+  IBMPlexMono_500Medium,
+  IBMPlexMono_600SemiBold,
+} from "@expo-google-fonts/ibm-plex-mono";
 import { TemaProvider, useTema } from "@/src/componentes/TemaProvider";
 import { resolverEstadoInicial } from "@/src/base/modoUso";
-
 
 type EstadoInicial = "onboarding" | "app" | null;
 
@@ -25,6 +49,13 @@ function Contenido() {
   const [estado, setEstado] = useState<EstadoInicial>(null);
   const [errorArranque, setErrorArranque] = useState<string | null>(null);
   const [intento, setIntento] = useState(0);
+
+  const [fuentesListas, errorFuentes] = useFonts({
+    Archivo_500Medium,
+    Archivo_700Bold,
+    IBMPlexMono_500Medium,
+    IBMPlexMono_600SemiBold,
+  });
 
   useEffect(() => {
     let vivo = true;
@@ -69,9 +100,13 @@ function Contenido() {
     },
   };
 
-  // Evita el destello del tema por defecto antes de leer las preferencias
-  // y de decidir si toca onboarding o app.
-  if (!listo || estado === null) {
+  // Una fuente que no carga NO debe dejar la app en negro: es un problema
+  // cosmético, no funcional. Se sigue adelante con la del sistema.
+  const fuentesResueltas = fuentesListas || Boolean(errorFuentes);
+
+  // Evita el destello del tema por defecto antes de leer las preferencias,
+  // de cargar las fuentes y de decidir si toca onboarding o app.
+  if (!listo || estado === null || !fuentesResueltas) {
     if (errorArranque) {
       return (
         <View

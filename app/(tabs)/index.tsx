@@ -1,20 +1,45 @@
 // YvexPOS Móvil — Pantalla INICIO.
 //
-// El pulso del negocio de un vistazo: resumen de hoy (vendido, tickets,
-// promedio), estado del turno (con CORTE al cerrarlo: efectivo esperado,
-// tarjeta, tickets), y las últimas ventas.
+// ---------------------------------------------------------------------------
+// QUÉ RESPONDE ESTA PANTALLA
+// ---------------------------------------------------------------------------
+// UNA sola pregunta: ¿cómo va mi negocio AHORA MISMO?
+//   · Cuánto llevo vendido hoy   (la única protagonista)
+//   · Cómo va el turno
+//   · Quién está vendiendo y cómo va la nube
+//   · La última venta, en una línea
+//
+// Todo lo demás salió de aquí. Departamentos, proveedores, cotizaciones o la
+// tienda en línea son HERRAMIENTAS: se usan de vez en cuando y se abren a
+// propósito. Listarlas en Inicio convertía el tablero en un menú disfrazado,
+// y obligaba a pasar por encima de nueve filas para ver dos cifras.
+//
+// Las últimas ventas eran una lista de seis. Se queda UNA línea: sirve para
+// "¿sí pasó el cobro?", que es un caso real. El historial vive en Reportes,
+// que es donde alguien va a buscarlo de verdad.
+//
+// ---------------------------------------------------------------------------
+// CÓMO SE ENTRA A LAS HERRAMIENTAS — hay dos variantes, se elige abajo
+// ---------------------------------------------------------------------------
+// Cambia VARIANTE_PANEL y compara. El panel es el mismo en ambas: solo cambia
+// la puerta.
+//
+//   "tirador"  Barra fija sobre las pestañas. Se abre tocándola o
+//              arrastrándola hacia arriba. Siempre a mano, en la zona del
+//              pulgar, y no gasta un destino de navegación.
+//              El gesto NO es la única vía: quien no lo descubra, la toca.
+//
+//   "cajon"    Bloque dentro del contenido. Imposible de no ver, cero
+//              gestos que aprender. A cambio se va con el scroll: si el
+//              usuario bajó, tiene que subir para alcanzarlo.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   View,
-  Text,
-  ScrollView,
   Pressable,
   StyleSheet,
-  Alert,
   RefreshControl,
-  type ViewStyle,
-  type TextStyle,
+  TextInput,
 } from "react-native";
 import Animated, {
   useSharedValue,
@@ -34,10 +59,29 @@ import {
   ventasRecientes,
   corteTurno,
   cerrarTurno,
+  leerConteoCiegoActivo,
+  registrarConteoTurno,
+  registrarMovimientoBolsa,
 } from "@/src/base/venta";
-import { pesos, fmtFecha } from "@/src/base/formato";
+import { pesos, fmtFecha, aCentavos } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton } from "@/src/componentes/ui";
+import { useReduceMotion } from "@/src/componentes/useReduceMotion";
+import {
+  Pantalla,
+  Encabezado,
+  Seccion,
+  Lamina,
+  Grupo,
+  Fila,
+  Txt,
+  Monto,
+  Vacio,
+  Hoja,
+  Boton,
+  Campo,
+  Banner,
+  useEstiloInput,
+} from "@/src/componentes/ui";
 import ModalDepartamentos from "@/src/componentes/ModalDepartamentos";
 import { IconoUI } from "@/src/componentes/iconos";
 import ModalUsuarios from "@/src/componentes/ModalUsuarios";
@@ -57,7 +101,22 @@ import { estadoTienda } from "@/src/base/tienda";
 import { leerReglas } from "@/src/base/lealtad";
 import ModalDinero from "@/src/componentes/ModalDinero";
 import ModalEtiquetas from "@/src/componentes/ModalEtiquetas";
+import ModalRecetas from "@/src/componentes/ModalRecetas";
+import ModalCredito from "@/src/componentes/ModalCredito";
 import ModalMovimientoCaja from "@/src/componentes/ModalMovimientoCaja";
+import {
+  PanelHerramientas,
+  TiradorHerramientas,
+  CajonHerramientas,
+} from "@/src/componentes/PanelHerramientas";
+import {
+  IdHerramienta,
+  TODAS_HERRAMIENTAS,
+  herramientaPorId,
+  leerAncladas,
+  leerAccesosOcultos,
+  guardarAccesosOcultos,
+} from "@/src/base/herramientas";
 import {
   Mision,
   obtenerMisiones,
@@ -67,12 +126,18 @@ import {
 import { sonidoExito } from "@/src/base/sonidos";
 
 type Tema = ReturnType<typeof useTema>["tema"];
+type Corte = Awaited<ReturnType<typeof corteTurno>>;
 
-// --- Celebración de misiones completas (una sola vez en la vida de la app) ---
+// La bandera que decide la puerta de entrada al panel. Cambia esto y prueba.
+const VARIANTE_PANEL: "tirador" | "cajon" = "tirador";
 
-/** Partícula de confeti: punto o rombo con color del tema (acento, turquesa
- *  o éxito — se ve bien en los 6 temas, claros y oscuros). Trayectoria
- *  determinista por índice: sube un poco y cae mientras se desvanece. */
+// ===========================================================================
+// Celebración de misiones completas (una sola vez en la vida de la app)
+// ===========================================================================
+
+/** Partícula de confeti. Trayectoria determinista por índice: sube un poco y
+ *  cae mientras se desvanece. Los colores salen del tema, así se ve bien en
+ *  los 7 temas, claros y oscuros. */
 function Particula({ i, T }: { i: number; T: Tema }) {
   const cfg = useMemo(() => {
     const r = (n: number) => {
@@ -80,17 +145,19 @@ function Particula({ i, T }: { i: number; T: Tema }) {
       return x - Math.floor(x);
     };
     return {
-      dx: (r(1) - 0.5) * 230,          // dispersión horizontal
-      sube: 40 + r(2) * 70,            // cuánto sube al salir
-      cae: 120 + r(3) * 120,           // cuánto termina cayendo
+      dx: (r(1) - 0.5) * 230,
+      sube: 40 + r(2) * 70,
+      cae: 120 + r(3) * 120,
       dur: 950 + r(4) * 750,
       delay: r(5) * 260,
       tam: 5 + r(6) * 5,
-      color: [T.acento, T.turquesa, T.exito][i % 3],
+      // Antes el tercer color era T.turquesa (el segundo acento fantasma).
+      // Ahora: acento, éxito y el acento atenuado — una sola familia.
+      color: [T.acento, T.exito, T.acentoBorde][i % 3],
       rombo: i % 2 === 1,
       giro: (r(7) - 0.5) * 340,
     };
-  }, [i, T.acento, T.turquesa, T.exito]);
+  }, [i, T.acento, T.exito, T.acentoBorde]);
 
   const p = useSharedValue(0);
   useEffect(() => {
@@ -105,7 +172,6 @@ function Particula({ i, T }: { i: number; T: Tema }) {
     opacity: interpolate(p.value, [0, 0.12, 0.72, 1], [0, 1, 1, 0]),
     transform: [
       { translateX: cfg.dx * p.value },
-      // parábola sencilla: primero sube, luego cae
       { translateY: -cfg.sube * p.value + cfg.cae * p.value * p.value },
       { rotate: `${cfg.giro * p.value}deg` },
     ],
@@ -129,66 +195,421 @@ function Particula({ i, T }: { i: number; T: Tema }) {
   );
 }
 
-type Estilos = ReturnType<typeof crearEstilos>;
-
 /** Tarjeta de celebración: entra con resorte + fade, ráfaga de confeti y
- *  sonidoExito() la primera vez (junto con marcarFestejoVisto()). "Entendido"
- *  cierra con animación de salida. */
-function Celebracion({ T, est, onCerrar }: { T: Tema; est: Estilos; onCerrar: () => void }) {
+ *  sonidoExito() la primera vez. "Entendido" cierra con animación de salida. */
+function Celebracion({ T, onCerrar }: { T: Tema; onCerrar: () => void }) {
+  const reducirMovimiento = useReduceMotion();
   const entrada = useSharedValue(0);
   const salida = useSharedValue(0);
 
   useEffect(() => {
     sonidoExito();
     void marcarFestejoVisto(); // la celebración se vive una sola vez
-    entrada.value = withSpring(1, { damping: 13, stiffness: 170 });
+    entrada.value = reducirMovimiento ? 1 : withSpring(1, { damping: 13, stiffness: 170 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const stCard = useAnimatedStyle(() => ({
     opacity: entrada.value * (1 - salida.value),
-    transform: [
-      { scale: (0.85 + 0.15 * entrada.value) * (1 - 0.08 * salida.value) },
-    ],
+    transform: [{ scale: (0.85 + 0.15 * entrada.value) * (1 - 0.08 * salida.value) }],
   }));
 
   function cerrar() {
-    salida.value = withTiming(1, { duration: 180 });
-    setTimeout(onCerrar, 190);
+    salida.value = reducirMovimiento ? 1 : withTiming(1, { duration: 180 });
+    setTimeout(onCerrar, reducirMovimiento ? 0 : 190);
   }
 
   return (
-    <View style={est.festejoWrap} pointerEvents="box-none">
-      <Animated.View style={[est.festejoCaja, stCard]}>
-        <Text style={est.festejoTitulo}>Tu negocio ya está listo para despegar</Text>
-        <Text style={est.festejoTxt}>
+    <View
+      style={{
+        marginBottom: T.esps.xl,
+        alignItems: "center",
+        justifyContent: "center",
+      }}
+      pointerEvents="box-none"
+    >
+      <Animated.View
+        style={[
+          {
+            width: "100%",
+            backgroundColor: T.superficie,
+            borderRadius: T.radioGrande,
+            padding: T.esps.xl,
+            gap: T.esps.md,
+            borderWidth: 1,
+            borderColor: T.acentoBorde,
+            shadowColor: T.acento,
+            shadowOpacity: 0.3,
+            shadowRadius: 20,
+            shadowOffset: { width: 0, height: 8 },
+            elevation: 6,
+          },
+          stCard,
+        ]}
+      >
+        <Txt escala="titulo" fuerte>
+          Tu negocio ya está listo para despegar
+        </Txt>
+        <Txt escala="pie" tono="suave">
           Nombre, catálogo, primeras ventas y ese toque final de tu giro: lo
           esencial quedó en su lugar. Ahora sí, a venderle con todo.
-        </Text>
+        </Txt>
         {/* CÓDIGO PROMOCIONAL: cuando exista el paywall, insertar aquí el
-            código de descuento de bienvenida (p. ej. un Text con el código
-            canjeable). La celebración es el momento de mayor cariño del
-            usuario: es el lugar natural para ese regalo. */}
-        <Boton titulo="Entendido" chico onPress={cerrar} />
+            código de descuento de bienvenida. La celebración es el momento de
+            mayor cariño del usuario: es el lugar natural para ese regalo. */}
+        <View style={{ marginTop: T.esps.xs }}>
+          <Boton titulo="Entendido" chico onPress={cerrar} />
+        </View>
       </Animated.View>
-      {Array.from({ length: 14 }, (_, i) => (
-        <Particula key={i} i={i} T={T} />
-      ))}
+      {/* Confeti: puramente decorativo, partículas que se mueven por la
+          pantalla — justo lo que un ajuste de movimiento reducido pide
+          evitar. Sin él, la tarjeta y el mensaje se ven exactamente igual;
+          no se pierde nada funcional al quitarlo. */}
+      {!reducirMovimiento &&
+        Array.from({ length: 14 }, (_, i) => <Particula key={i} i={i} T={T} />)}
     </View>
   );
 }
 
+// ===========================================================================
+// HOJA DE CORTE — reemplaza el Alert nativo
+// ===========================================================================
+//
+// Formato de ticket: las cifras bajan en columna, alineadas con Plex Mono
+// tabular, y el efectivo esperado cierra en grande. Es el número que el
+// tendero va a comparar contra lo que tiene en el cajón, así que es lo único
+// que crece.
+//
+// Las dos acciones viven abajo, en la zona del pulgar. "Seguir vendiendo"
+// primero por peso visual: cerrar el turno es la decisión irreversible.
+function HojaCorte({
+  visible,
+  corte,
+  turno,
+  conteoCiegoActivo,
+  onCerrarTurno,
+  onSeguir,
+}: {
+  visible: boolean;
+  corte: Corte | null;
+  turno: Turno | null;
+  /** Si está activo, el efectivo esperado y el desglose de efectivo se
+   *  ocultan hasta que el cajero captura lo que contó — mostrar el desglose
+   *  antes dejaría reconstruir el esperado a mano (fondo + efectivo +
+   *  entradas − salidas), así que no basta con ocultar solo el resultado
+   *  final. Ver nota completa más abajo. */
+  conteoCiegoActivo: boolean;
+  onCerrarTurno: () => void;
+  onSeguir: () => void;
+}) {
+  const { tema: T } = useTema();
+  const estiloInput = useEstiloInput();
+  const [cerrando, setCerrando] = useState(false);
+  const [errorCierre, setErrorCierre] = useState("");
+  const [contadoTexto, setContadoTexto] = useState("");
+  const [registrandoConteo, setRegistrandoConteo] = useState(false);
+  const [resultadoConteo, setResultadoConteo] = useState<{ diferenciaCentavos: number } | null>(null);
+  const [errorConteo, setErrorConteo] = useState("");
+  const [registrandoBolsa, setRegistrandoBolsa] = useState(false);
+  const [bolsaRegistrada, setBolsaRegistrada] = useState(false);
+
+  // Cada vez que se abre un corte nuevo, el conteo anterior no debe
+  // arrastrarse — si no, cerrar un turno y abrir el siguiente heredaría la
+  // respuesta del turno pasado.
+  useEffect(() => {
+    if (visible) {
+      setContadoTexto("");
+      setResultadoConteo(null);
+      setErrorConteo("");
+      setErrorCierre("");
+      setBolsaRegistrada(false);
+    }
+  }, [visible]);
+
+  if (!corte) return null;
+
+  // ¿Ya se puede mostrar el desglose de efectivo? Con el conteo a ciegas
+  // apagado, siempre. Con el conteo a ciegas prendido, solo después de que
+  // el cajero confirmó lo que contó — antes de eso, "Cómo te pagaron" y
+  // "Movimientos de caja" se quedan ocultos A PROPÓSITO: fondo + efectivo +
+  // entradas − salidas ES el efectivo esperado, así que enseñar esas partes
+  // sueltas sería lo mismo que enseñar la respuesta.
+  const puedeVerDesglose = !conteoCiegoActivo || resultadoConteo !== null;
+
+  const linea = (etiqueta: string, valor: string, tono?: "suave" | "peligro") => (
+    <View
+      style={{
+        flexDirection: "row",
+        justifyContent: "space-between",
+        alignItems: "center",
+        paddingVertical: T.esps.sm,
+      }}
+    >
+      <Txt escala="pie" tono="suave">
+        {etiqueta}
+      </Txt>
+      <Monto texto={valor} escala="pie" tono={tono === "peligro" ? "peligro" : "principal"} />
+    </View>
+  );
+
+  async function confirmarConteo() {
+    if (!turno) return;
+    setErrorConteo("");
+    if (contadoTexto.trim() === "") {
+      setErrorConteo("Escribe cuánto contaste en el cajón.");
+      return;
+    }
+    const centavos = aCentavos(contadoTexto);
+    if (centavos < 0) {
+      setErrorConteo("Ese monto no es válido.");
+      return;
+    }
+    setRegistrandoConteo(true);
+    try {
+      const r = await registrarConteoTurno(turno, centavos);
+      setResultadoConteo(r);
+    } catch (e: any) {
+      setErrorConteo(e?.message ?? String(e));
+    } finally {
+      setRegistrandoConteo(false);
+    }
+  }
+
+  async function agregarABolsa() {
+    if (!turno || !resultadoConteo) return;
+    setRegistrandoBolsa(true);
+    try {
+      await registrarMovimientoBolsa(turno.id, resultadoConteo.diferenciaCentavos);
+      setBolsaRegistrada(true);
+    } finally {
+      setRegistrandoBolsa(false);
+    }
+  }
+
+  // Con el conteo a ciegas activo, cerrar el turno sin haber contado
+  // primero dejaría la función entera sin efecto — el mismo hueco que tenía
+  // el corte antes de todo esto. Se exige confirmar el conteo primero.
+  const cierreBloqueado = conteoCiegoActivo && resultadoConteo === null;
+
+  return (
+    <Hoja
+      visible={visible}
+      onCerrar={onSeguir}
+      titulo="Corte del turno"
+      tipo="completa"
+      pie={
+        <View style={{ gap: T.esps.sm }}>
+          <Boton titulo="Seguir vendiendo" tipo="secundario" onPress={onSeguir} />
+          <Boton
+            titulo="Cerrar turno"
+            tipo="peligro"
+            cargando={cerrando}
+            deshabilitado={cierreBloqueado}
+            onPress={async () => {
+              setErrorCierre("");
+              setCerrando(true);
+              try {
+                await onCerrarTurno();
+              } catch (e: any) {
+                // Antes: sin try/catch, un error aquí (p. ej. "este turno
+                // lo abrió otro usuario") dejaba el botón trabado en
+                // "cargando" para siempre y el usuario nunca veía por qué.
+                setErrorCierre(e?.message ?? String(e));
+              } finally {
+                setCerrando(false);
+              }
+            }}
+          />
+        </View>
+      }
+    >
+      <Banner texto={errorCierre} tipo="error" />
+
+      {/* Lo vendido: la lámina de esta hoja. No revela nada del efectivo en
+          el cajón (mezcla tarjeta y efectivo), así que se ve siempre. */}
+      <Lamina>
+        <Txt escala="micro" tono="suave" fuerte mayus>
+          Vendido en el turno
+        </Txt>
+        <View style={{ marginTop: T.esps.xs }}>
+          <Monto texto={pesos(corte.total_centavos)} escala="protagonista" />
+        </View>
+        <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+          {corte.tickets} {corte.tickets === 1 ? "ticket" : "tickets"}
+        </Txt>
+      </Lamina>
+
+      <View style={{ height: T.esps.xl }} />
+
+      {!puedeVerDesglose ? (
+        // --- Conteo a ciegas: aquí va el conteo, no la respuesta ---
+        <View
+          style={{
+            backgroundColor: T.acentoSuave,
+            borderRadius: T.radio,
+            padding: T.esps.lg,
+            borderWidth: 1,
+            borderColor: T.acentoBorde,
+          }}
+        >
+          <Txt escala="micro" tono="suave" fuerte mayus>
+            ¿Cuánto contaste en el cajón?
+          </Txt>
+          <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs, marginBottom: T.esps.md }}>
+            Cuenta todo el efectivo físico primero. Al confirmar se revela si
+            cuadra o no — así el conteo no se ajusta viendo la respuesta antes.
+          </Txt>
+          <Campo label="Efectivo contado">
+            <TextInput
+              style={estiloInput}
+              value={contadoTexto}
+              onChangeText={setContadoTexto}
+              placeholder="0.00"
+              placeholderTextColor={T.textoTenue}
+              keyboardType="decimal-pad"
+              autoFocus
+            />
+          </Campo>
+          <Banner texto={errorConteo} tipo="error" />
+          <Boton titulo="Confirmar conteo" onPress={confirmarConteo} cargando={registrandoConteo} />
+        </View>
+      ) : (
+        <>
+          {/* Desglose, en formato de ticket impreso. */}
+          <View
+            style={{
+              backgroundColor: T.superficie,
+              borderRadius: T.radio,
+              paddingHorizontal: T.esps.lg,
+              paddingVertical: T.esps.md,
+            }}
+          >
+            <Txt escala="micro" tono="suave" fuerte mayus>
+              Cómo te pagaron
+            </Txt>
+            {linea("Efectivo", pesos(corte.efectivo_centavos))}
+            {linea("Tarjeta", pesos(corte.tarjeta_centavos))}
+
+            <View
+              style={{
+                height: StyleSheet.hairlineWidth,
+                backgroundColor: T.borde,
+                marginVertical: T.esps.sm,
+              }}
+            />
+
+            <Txt escala="micro" tono="suave" fuerte mayus>
+              Movimientos de caja
+            </Txt>
+            {linea("Fondo inicial", pesos(corte.fondo_centavos))}
+            {corte.entradas_centavos > 0
+              ? linea("Entradas de efectivo", pesos(corte.entradas_centavos))
+              : null}
+            {corte.salidas_centavos > 0
+              ? linea("Salidas de efectivo", `−${pesos(corte.salidas_centavos)}`, "peligro")
+              : null}
+          </View>
+
+          <View style={{ height: T.esps.lg }} />
+
+          {/* El número que se compara contra el cajón. */}
+          <View
+            style={{
+              backgroundColor: T.acentoSuave,
+              borderRadius: T.radio,
+              padding: T.esps.lg,
+              borderWidth: 1,
+              borderColor: T.acentoBorde,
+            }}
+          >
+            <Txt escala="micro" tono="suave" fuerte mayus>
+              Efectivo esperado en cajón
+            </Txt>
+            <View style={{ marginTop: T.esps.xs }}>
+              <Monto texto={pesos(corte.efectivo_esperado_centavos)} escala="titulo" tono="acento" />
+            </View>
+            {!conteoCiegoActivo && (
+              <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+                Cuenta el cajón y compáralo con esta cifra antes de cerrar.
+              </Txt>
+            )}
+          </View>
+
+          {/* Resultado del conteo a ciegas: solo aparece tras confirmar. */}
+          {conteoCiegoActivo && resultadoConteo !== null && (
+            <View style={{ marginTop: T.esps.lg }}>
+              <View
+                style={{
+                  backgroundColor:
+                    resultadoConteo.diferenciaCentavos === 0
+                      ? T.exitoSuave
+                      : T.peligroSuave,
+                  borderRadius: T.radio,
+                  padding: T.esps.lg,
+                  borderWidth: 1,
+                  borderColor:
+                    resultadoConteo.diferenciaCentavos === 0 ? T.exito : T.peligro,
+                }}
+              >
+                <Txt escala="micro" tono="suave" fuerte mayus>
+                  {resultadoConteo.diferenciaCentavos === 0
+                    ? "Cuadró exacto"
+                    : resultadoConteo.diferenciaCentavos > 0
+                    ? "Sobró"
+                    : "Faltó"}
+                </Txt>
+                <View style={{ marginTop: T.esps.xs }}>
+                  <Monto
+                    texto={pesos(Math.abs(resultadoConteo.diferenciaCentavos))}
+                    escala="titulo"
+                    tono={
+                      resultadoConteo.diferenciaCentavos === 0
+                        ? "exito"
+                        : "peligro"
+                    }
+                  />
+                </View>
+                <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+                  Contaste {pesos(aCentavos(contadoTexto))} contra{" "}
+                  {pesos(corte.efectivo_esperado_centavos)} esperado.
+                </Txt>
+              </View>
+
+              {resultadoConteo.diferenciaCentavos !== 0 && (
+                <View style={{ marginTop: T.esps.md }}>
+                  {bolsaRegistrada ? (
+                    <Txt escala="pie" tono="exito" fuerte estilo={{ textAlign: "center" }}>
+                      ✓ Registrado en la bolsa de caja
+                    </Txt>
+                  ) : (
+                    <Boton
+                      titulo="Registrar en la bolsa del negocio"
+                      tipo="secundario"
+                      onPress={agregarABolsa}
+                      cargando={registrandoBolsa}
+                    />
+                  )}
+                </View>
+              )}
+            </View>
+          )}
+        </>
+      )}
+    </Hoja>
+  );
+}
+
+// ===========================================================================
+// PANTALLA
+// ===========================================================================
+
 export default function InicioScreen() {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const [turno, setTurno] = useState<Turno | null>(null);
   const [resumen, setResumen] = useState<ResumenHoy | null>(null);
   const [recientes, setRecientes] = useState<VentaReciente[]>([]);
   const [refrescando, setRefrescando] = useState(false);
-  const [deptosAbierto, setDeptosAbierto] = useState(false);
-  const [usuariosAbierto, setUsuariosAbierto] = useState(false);
   const [usuario, setUsuario] = useState<UsuarioPOS | null>(null);
-  const [syncAbierto, setSyncAbierto] = useState(false);
   const [sync, setSync] = useState<EstadoSync | null>(null);
   const [syncAuto, setSyncAuto] = useState<boolean>(true);
   const [negocio, setNegocio] = useState<string | null>(null);
@@ -196,18 +617,26 @@ export default function InicioScreen() {
   const [festejo, setFestejo] = useState(false);
   const [avisosProv, setAvisosProv] = useState<AvisoVisita[]>([]);
   const [modoUso, setModoUso] = useState<ModoUso>("ambos");
-  const [proveedoresAbierto, setProveedoresAbierto] = useState(false);
-  const [lealtadAbierto, setLealtadAbierto] = useState(false);
-  const [cotizacionesAbierto, setCotizacionesAbierto] = useState(false);
-  const [dineroAbierto, setDineroAbierto] = useState(false);
-  const [movimientoAbierto, setMovimientoAbierto] = useState(false);
-  const [etiquetasAbierto, setEtiquetasAbierto] = useState(false);
-  const [tiendaAbierto, setTiendaAbierto] = useState(false);
-  const [pedidosWebAbierto, setPedidosWebAbierto] = useState(false);
   const [lealtadActiva, setLealtadActiva] = useState(true);
+  // Conteo a ciegas del corte de turno: opcional, se lee de Ajustes. Con
+  // esto activo, HojaCorte oculta el efectivo esperado hasta que el
+  // cajero captura lo que contó.
+  const [conteoCiegoActivo, setConteoCiegoActivo] = useState(false);
   // Badge de pedidos web nuevos (viene de /api/tienda/estado, tolerante a
   // offline: null → 0 y la fila se muestra igual).
   const [pedidosNuevos, setPedidosNuevos] = useState(0);
+
+  // Un solo estado para saber qué herramienta está abierta, en vez de nueve
+  // banderas booleanas independientes que podían quedar en estados imposibles
+  // (dos modales "abiertos" a la vez).
+  const [abierta, setAbierta] = useState<IdHerramienta | null>(null);
+  const [panelAbierto, setPanelAbierto] = useState(false);
+  const [ancladas, setAncladas] = useState<IdHerramienta[]>([]);
+  const [accesosOcultos, setAccesosOcultos] = useState(false);
+  const [usuariosAbierto, setUsuariosAbierto] = useState(false);
+  const [syncAbierto, setSyncAbierto] = useState(false);
+  const [movimientoAbierto, setMovimientoAbierto] = useState(false);
+  const [corte, setCorte] = useState<Corte | null>(null);
 
   const cargar = useCallback(async () => {
     // Garantiza usuario activo si ya existen usuarios. Si la base está limpia
@@ -231,8 +660,11 @@ export default function InicioScreen() {
     setSync(await estadoSync());
     setSyncAuto(await leerSyncAuto());
     setNegocio(await leerNombreNegocio());
-    // Programa de lealtad: si está apagado, la fila no aparece en Inicio.
+    // Programa de lealtad: si está apagado, la herramienta no aparece.
     setLealtadActiva((await leerReglas()).activa);
+    setConteoCiegoActivo(await leerConteoCiegoActivo());
+    setAncladas(await leerAncladas());
+    setAccesosOcultos(await leerAccesosOcultos());
 
     // Pedidos web nuevos: consulta ligera al enfocar Inicio. estadoTienda
     // devuelve null sin internet o sin cuenta y aquí no molesta.
@@ -270,8 +702,8 @@ export default function InicioScreen() {
   }, []);
 
   // Sincronización automática al abrir la pantalla (silenciosa: si falla, no
-  // molesta; el estado queda visible en la píldora). Respeta la preferencia
-  // del usuario: si apagó el respaldo automático, aquí no sube nada.
+  // molesta; el estado queda visible en la fila). Respeta la preferencia del
+  // usuario: si apagó el respaldo automático, aquí no sube nada.
   const autoSync = useCallback(async () => {
     const e = await estadoSync();
     if (!e.vinculado) return;
@@ -294,29 +726,14 @@ export default function InicioScreen() {
 
   async function pedirCorte() {
     if (!turno) return;
-    const c = await corteTurno(turno);
-    Alert.alert(
-      "Corte del turno",
-      `Tickets: ${c.tickets}\n` +
-        `Vendido: ${pesos(c.total_centavos)}\n\n` +
-        `Efectivo: ${pesos(c.efectivo_centavos)}\n` +
-        `Tarjeta: ${pesos(c.tarjeta_centavos)}\n` +
-        `Fondo inicial: ${pesos(c.fondo_centavos)}\n` +
-        (c.entradas_centavos > 0 ? `Entradas de efectivo: ${pesos(c.entradas_centavos)}\n` : "") +
-        (c.salidas_centavos > 0 ? `Salidas de efectivo: −${pesos(c.salidas_centavos)}\n` : "") +
-        `\nEfectivo esperado en cajón:\n${pesos(c.efectivo_esperado_centavos)}`,
-      [
-        { text: "Seguir vendiendo", style: "cancel" },
-        {
-          text: "Cerrar turno",
-          style: "destructive",
-          onPress: async () => {
-            await cerrarTurno(turno.id);
-            cargar();
-          },
-        },
-      ]
-    );
+    setCorte(await corteTurno(turno));
+  }
+
+  async function confirmarCierre() {
+    if (!turno) return;
+    await cerrarTurno(turno.id);
+    setCorte(null);
+    cargar();
   }
 
   const saludo = (() => {
@@ -326,451 +743,542 @@ export default function InicioScreen() {
     return "Buenas noches";
   })();
 
+  // Visibilidad de cada herramienta según el estado del negocio.
+  function visible(id: IdHerramienta): boolean {
+    if (id === "lealtad") return lealtadActiva;
+    if (id === "tienda" || id === "pedidos") return modoUso !== "monitor";
+    return true;
+  }
+
+  function abrir(id: IdHerramienta) {
+    // "Productos" no es un modal: es la pestaña de Inventario.
+    if (id === "productos") {
+      router.push("/inventario");
+      return;
+    }
+    setAbierta(id);
+  }
+
+  const cerrarHerramienta = useCallback(() => setAbierta(null), []);
+  const cerrarYRecargar = useCallback(() => {
+    setAbierta(null);
+    cargar();
+  }, [cargar]);
+
   return (
-    <SafeAreaView style={est.raiz} edges={["top"]}>
-      <ScrollView
-        contentContainerStyle={est.cuerpo}
-        refreshControl={
+    <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }} edges={["top"]}>
+      <Pantalla
+        refresco={
           <RefreshControl refreshing={refrescando} onRefresh={onRefresh} tintColor={T.acento} />
         }
       >
-        {/* Marca + saludo (personalizado con el nombre del negocio) */}
-        <Text style={est.marca}>
-          Yvex<Text style={{ color: T.turquesa }}>POS</Text>
-          {negocio && negocio !== "Mi negocio" ? (
-            <Text style={{ color: T.textoSuave }}>  ·  {negocio}</Text>
-          ) : null}
-        </Text>
-        <Text style={est.saludo}>{saludo}</Text>
+        {/* El saludo ES el título de la pantalla. El wordmark "YvexPOS" se
+            retiró: se repetía en las cinco pestañas robando altura vertical,
+            que en un punto de venta es lo más caro que hay. La marca vive en
+            el ícono de la app y en el arranque. */}
+        <Encabezado
+          titulo={saludo}
+          meta={negocio && negocio !== "Mi negocio" ? negocio : undefined}
+        />
 
-        {/* Quién está vendiendo */}
-        {usuario && (
-          <Pressable
-            style={({ pressed }) => [
-              est.usuarioFila,
-              pressed && { backgroundColor: T.superficie3 },
-            ]}
-            onPress={() => setUsuariosAbierto(true)}
-          >
-            <View style={est.usuarioAvatar}>
-              <Text style={est.usuarioInicial}>
-                {usuario.nombre.trim()[0]?.toUpperCase() ?? "?"}
-              </Text>
-            </View>
-            <Text style={est.usuarioTxt}>
-              Vendiendo como <Text style={{ fontWeight: "800", color: T.texto }}>{usuario.nombre}</Text>
-            </Text>
-            <Text style={est.usuarioCambiar}>Cambiar</Text>
-          </Pressable>
-        )}
-
-        {/* Estado de sincronización */}
-        {sync?.vinculado && (
-          <Pressable
-            style={({ pressed }) => [
-              est.syncFila,
-              {
-                backgroundColor:
-                  sync.pendientes > 0 ? T.alertaSuave : T.superficie,
-                borderColor: sync.pendientes > 0 ? T.alerta : T.borde,
-              },
-              pressed && { opacity: 0.8 },
-            ]}
-            onPress={() => setSyncAbierto(true)}
-          >
-            <View
-              style={[
-                est.syncPunto,
-                { backgroundColor: sync.pendientes > 0 ? T.alerta : T.exito },
-              ]}
-            />
-            <Text style={est.syncTxt}>
-              {sync.pendientes > 0
-                ? `${sync.pendientes} por subir a la nube`
-                : syncAuto
-                  ? "Todo sincronizado"
-                  : "Respaldo manual: tú decides cuándo subir"}
-            </Text>
-            <Text style={est.syncVer}>Ver</Text>
-          </Pressable>
-        )}
-
-        {/* Vendido hoy — la tarjeta estrella */}
-        <View style={est.heroCaja}>
-          <Text style={est.heroLbl}>VENDIDO HOY</Text>
-          <Text style={est.heroVal}>{pesos(resumen?.total_centavos ?? 0)}</Text>
-          <View style={est.heroFila}>
-            <View style={est.heroDato}>
-              <Text style={est.heroDatoVal}>{resumen?.tickets ?? 0}</Text>
-              <Text style={est.heroDatoLbl}>tickets</Text>
-            </View>
-            <View style={est.heroSep} />
-            <View style={est.heroDato}>
-              <Text style={est.heroDatoVal}>{pesos(resumen?.promedio_centavos ?? 0)}</Text>
-              <Text style={est.heroDatoLbl}>ticket promedio</Text>
-            </View>
+        {/* Quién vende y cómo va la nube: contexto, no protagonismo. */}
+        {(usuario || sync?.vinculado) && (
+          <View style={{ marginBottom: T.esps.xl }}>
+            <Grupo>
+              {usuario ? (
+                <Fila
+                  titulo={usuario.nombre}
+                  meta="Vendiendo con esta cuenta"
+                  onPress={() => setUsuariosAbierto(true)}
+                  icono={
+                    <View
+                      style={{
+                        width: 26,
+                        height: 26,
+                        borderRadius: T.radioChico,
+                        backgroundColor: T.acentoSuave,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <Txt escala="pie" tono="acento" fuerte>
+                        {usuario.nombre.trim()[0]?.toUpperCase() ?? "?"}
+                      </Txt>
+                    </View>
+                  }
+                  valor={
+                    <Txt escala="pie" tono="acento" fuerte>
+                      Cambiar
+                    </Txt>
+                  }
+                  flecha={false}
+                />
+              ) : null}
+              {sync?.vinculado ? (
+                <Fila
+                  titulo={
+                    sync.pendientes > 0
+                      ? `${sync.pendientes} por subir a la nube`
+                      : syncAuto
+                        ? "Todo sincronizado"
+                        : "Respaldo manual"
+                  }
+                  meta={
+                    sync.pendientes > 0
+                      ? "Se subirán solas cuando haya internet"
+                      : syncAuto
+                        ? undefined
+                        : "Tú decides cuándo subir"
+                  }
+                  onPress={() => setSyncAbierto(true)}
+                  icono={
+                    <View
+                      style={{
+                        width: 9,
+                        height: 9,
+                        borderRadius: 5,
+                        backgroundColor: sync.pendientes > 0 ? T.alerta : T.exito,
+                      }}
+                    />
+                  }
+                />
+              ) : null}
+            </Grupo>
           </View>
+        )}
+
+        {/* Pedido web nuevo: el mismo lenguaje visual que el aviso de
+            proveedor de abajo (Fila destacada), pero ANTES de la lámina de
+            "Vendido hoy" — un cliente esperando su pedido es más urgente
+            que la cifra de cuánto se lleva vendido, así que se gana el
+            primer lugar sin robarle el protagonismo a la lámina (sigue
+            siendo la única <Lamina> de la pantalla). Antes esto solo vivía
+            como un número dentro del panel de Herramientas: había que
+            entrar a buscarlo para enterarte. */}
+        {pedidosNuevos > 0 && (
+          <View style={{ marginBottom: T.esps.xl }}>
+            <Grupo>
+              <Fila
+                destacado
+                titulo={`${pedidosNuevos} ${pedidosNuevos === 1 ? "pedido nuevo" : "pedidos nuevos"} de tu tienda en línea`}
+                meta="Tocar para revisarlos"
+                icono={<IconoUI id="pedido" size={20} color={T.acento} />}
+                onPress={() => abrir("pedidos")}
+              />
+            </Grupo>
+          </View>
+        )}
+
+        {/* Vendido hoy — la ÚNICA protagonista de la pantalla. */}
+        <View style={{ marginBottom: T.esps.xl }}>
+          <Lamina>
+            <Txt escala="micro" tono="suave" fuerte mayus>
+              Vendido hoy
+            </Txt>
+            <View style={{ marginTop: T.esps.xs }}>
+              <Monto texto={pesos(resumen?.total_centavos ?? 0)} escala="protagonista" />
+            </View>
+            <View
+              style={{
+                flexDirection: "row",
+                marginTop: T.esps.lg,
+                paddingTop: T.esps.lg,
+                borderTopWidth: StyleSheet.hairlineWidth,
+                borderTopColor: T.borde,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Monto texto={String(resumen?.tickets ?? 0)} escala="titulo" />
+                <Txt escala="pie" tono="suave">
+                  tickets
+                </Txt>
+              </View>
+              <View style={{ width: StyleSheet.hairlineWidth, backgroundColor: T.borde }} />
+              <View style={{ flex: 1, paddingLeft: T.esps.lg }}>
+                <Monto texto={pesos(resumen?.promedio_centavos ?? 0)} escala="titulo" />
+                <Txt escala="pie" tono="suave">
+                  ticket promedio
+                </Txt>
+              </View>
+            </View>
+          </Lamina>
         </View>
 
         {/* Turno */}
-        {turno ? (
-          <View style={est.turnoCaja}>
-            <View style={{ flex: 1 }}>
-              <View style={est.turnoFila}>
-                <View style={est.puntoVivo} />
-                <Text style={est.turnoTitulo}>Turno abierto</Text>
-              </View>
-              <Text style={est.turnoMeta}>
-                Desde {fmtFecha(turno.abierta_en)} · fondo {pesos(turno.fondo_inicial_centavos)}
-              </Text>
-            </View>
-            {/* Movimiento manual de efectivo: acción secundaria y rápida,
-                sin salir de Inicio. El corte ya suma/resta lo que se registre
-                aquí (entradas_centavos / salidas_centavos). */}
-            <Pressable
-              style={est.turnoBtnIcono}
-              onPress={() => setMovimientoAbierto(true)}
-              hitSlop={8}
-            >
-              <IconoUI id="dinero" size={18} color={T.textoSuave} />
-            </Pressable>
-            <Pressable style={est.turnoBtn} onPress={pedirCorte}>
-              <Text style={est.turnoBtnTxt}>Corte</Text>
-            </Pressable>
-          </View>
-        ) : (
-          <View style={est.turnoCaja}>
-            <View style={{ flex: 1 }}>
-              <Text style={est.turnoTitulo}>Sin turno abierto</Text>
-              <Text style={est.turnoMeta}>Abre un turno para empezar a vender.</Text>
-            </View>
-            <Pressable style={[est.turnoBtn, { backgroundColor: T.acento, borderColor: T.acento }]} onPress={() => router.push("/vender")}>
-              <Text style={[est.turnoBtnTxt, { color: T.acentoTexto }]}>Abrir</Text>
-            </Pressable>
-          </View>
-        )}
+        <View style={{ marginBottom: T.esps.xl }}>
+          <Grupo>
+            {turno ? (
+              <Fila
+                titulo="Turno abierto"
+                meta={`Desde ${fmtFecha(turno.abierta_en)} · fondo ${pesos(
+                  turno.fondo_inicial_centavos
+                )}`}
+                icono={
+                  <View
+                    style={{
+                      width: 9,
+                      height: 9,
+                      borderRadius: 5,
+                      backgroundColor: T.exito,
+                    }}
+                  />
+                }
+                flecha={false}
+                valor={
+                  <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+                    {/* Movimiento manual de efectivo: acción rápida sin salir
+                        de Inicio. El corte ya suma/resta lo que se registre. */}
+                    <Pressable
+                      onPress={() => setMovimientoAbierto(true)}
+                      hitSlop={8}
+                      accessibilityLabel="Entrada o salida de efectivo"
+                      style={{
+                        minWidth: 44,
+                        minHeight: 44,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: T.radioChico,
+                        backgroundColor: T.superficie2,
+                      }}
+                    >
+                      <IconoUI id="dinero" size={18} color={T.textoSuave} />
+                    </Pressable>
+                    <Pressable
+                      onPress={pedirCorte}
+                      style={{
+                        minHeight: 44,
+                        paddingHorizontal: T.esps.lg,
+                        alignItems: "center",
+                        justifyContent: "center",
+                        borderRadius: T.radioChico,
+                        backgroundColor: T.acentoSuave,
+                      }}
+                    >
+                      <Txt escala="pie" tono="acento" fuerte>
+                        Corte
+                      </Txt>
+                    </Pressable>
+                  </View>
+                }
+              />
+            ) : (
+              <Fila
+                titulo="Sin turno abierto"
+                meta="Abre un turno para empezar a vender."
+                flecha={false}
+                valor={
+                  <Pressable
+                    onPress={() => router.push("/vender")}
+                    style={{
+                      minHeight: 44,
+                      paddingHorizontal: T.esps.lg,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      borderRadius: T.radioChico,
+                      backgroundColor: T.acentoRelleno,
+                    }}
+                  >
+                    <Txt escala="pie" fuerte estilo={{ color: T.acentoTexto }}>
+                      Abrir
+                    </Txt>
+                  </Pressable>
+                }
+              />
+            )}
+          </Grupo>
+        </View>
 
-        {/* Aviso de visita de proveedores: visible pero sin estorbar al turno.
-            Solo si el modo de uso incluye POS (pos/ambos). */}
+        {/* Aviso de visita de proveedores. Solo si este dispositivo vende. */}
         {modoUso !== "monitor" && avisosProv.length > 0 && (
-          <Pressable
-            style={({ pressed }) => [
-              est.avisoProv,
-              pressed && { backgroundColor: T.superficie3 },
-            ]}
-            onPress={() => setProveedoresAbierto(true)}
-          >
-            <View style={est.avisoProvIcono}>
-              <IconoUI id="camion" size={20} color={T.acento} />
-            </View>
-            <View style={{ flex: 1 }}>
-              <Text style={est.avisoProvTxt}>
-                {avisosProv[0].etiqueta} llega{" "}
-                <Text style={{ fontWeight: "800", color: T.texto }}>
-                  {avisosProv[0].proveedor.nombre}
-                </Text>
-                {avisosProv.length > 1 ? ` y ${avisosProv.length - 1} más` : ""}
-              </Text>
-              {avisosProv[0].ultimoTicketCentavos != null && (
-                <Text style={est.avisoProvMeta}>
-                  Último ticket {pesos(avisosProv[0].ultimoTicketCentavos)}
-                  {avisosProv[0].ticketPromedioCentavos != null
-                    ? ` · promedio ${pesos(avisosProv[0].ticketPromedioCentavos)}`
-                    : ""}
-                </Text>
-              )}
-            </View>
-            <Text style={est.avisoProvFlecha}>→</Text>
-          </Pressable>
+          <View style={{ marginBottom: T.esps.xl }}>
+            <Grupo>
+              <Fila
+                destacado
+                titulo={`${avisosProv[0].etiqueta} llega ${avisosProv[0].proveedor.nombre}${
+                  avisosProv.length > 1 ? ` y ${avisosProv.length - 1} más` : ""
+                }`}
+                meta={
+                  avisosProv[0].ultimoTicketCentavos != null
+                    ? `Último ticket ${pesos(avisosProv[0].ultimoTicketCentavos)}${
+                        avisosProv[0].ticketPromedioCentavos != null
+                          ? ` · promedio ${pesos(avisosProv[0].ticketPromedioCentavos)}`
+                          : ""
+                      }`
+                    : undefined
+                }
+                icono={<IconoUI id="camion" size={20} color={T.acento} />}
+                onPress={() => setAbierta("proveedores")}
+              />
+            </Grupo>
+          </View>
         )}
 
         {/* Tu arranque — misiones para dejar el negocio listo */}
         {misiones && misiones.length > 0 && (
-          <>
-            <View style={est.arranqueCab}>
-              <Text style={est.seccion}>TU ARRANQUE</Text>
-              <Text style={est.arranqueConteo}>
-                {misiones.filter((x) => x.hecho).length} de {misiones.length}
-              </Text>
-            </View>
-            <View style={est.misiones}>
+          <Seccion titulo="Tu arranque">
+            <Grupo>
               {misiones.map((m) => (
-                <Pressable
+                <Fila
                   key={m.id}
-                  style={({ pressed }) => [
-                    est.mision,
-                    m.hecho && est.misionHecha,
-                    pressed && !m.hecho && { backgroundColor: T.superficie3 },
-                  ]}
-                  onPress={() => {
-                    if (m.hecho) return;
-                    if (m.id === "ventas") router.push("/vender");
-                    else if (m.id === "productos" || m.id === "giro")
-                      router.push("/inventario");
-                    else router.push("/ajustes");
-                  }}
-                >
-                  <View
-                    style={[
-                      est.misionIcono,
-                      m.hecho && { backgroundColor: T.exitoSuave, borderColor: T.exito },
-                    ]}
-                  >
-                    {m.hecho ? (
-                      <Text style={est.misionPaloma}>✓</Text>
+                  titulo={m.titulo}
+                  meta={m.hecho ? undefined : m.detalle}
+                  flecha={!m.hecho}
+                  onPress={
+                    m.hecho
+                      ? undefined
+                      : () => {
+                          if (m.id === "ventas") router.push("/vender");
+                          else if (m.id === "productos" || m.id === "giro")
+                            router.push("/inventario");
+                          else router.push("/ajustes");
+                        }
+                  }
+                  icono={
+                    m.hecho ? (
+                      <Txt escala="cuerpo" tono="exito" fuerte>
+                        ✓
+                      </Txt>
                     ) : (
                       <IconoUI id={m.icono} size={19} color={T.acento} />
-                    )}
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <View style={est.misionTituloFila}>
-                      <Text
-                        style={[
-                          est.misionTitulo,
-                          m.hecho && { color: T.textoSuave },
-                        ]}
-                      >
-                        {m.titulo}
-                      </Text>
-                      <Text
-                        style={[
-                          est.misionProgreso,
-                          m.hecho && { color: T.exito },
-                        ]}
-                      >
-                        {m.hecho ? "Hecho" : `${m.progreso}/${m.meta}`}
-                      </Text>
-                    </View>
-                    {!m.hecho && (
-                      <>
-                        <View style={est.barra}>
-                          <View
-                            style={[
-                              est.barraRelleno,
-                              { width: `${Math.round((m.progreso / m.meta) * 100)}%` },
-                            ]}
-                          />
-                        </View>
-                        <Text style={est.misionDetalle}>{m.detalle}</Text>
-                      </>
-                    )}
-                  </View>
-                  {!m.hecho && <Text style={est.misionFlecha}>→</Text>}
-                </Pressable>
+                    )
+                  }
+                  valor={
+                    m.hecho ? (
+                      <Txt escala="pie" tono="exito" fuerte>
+                        Hecho
+                      </Txt>
+                    ) : (
+                      <Monto texto={`${m.progreso}/${m.meta}`} escala="pie" tono="acento" />
+                    )
+                  }
+                />
               ))}
-            </View>
-          </>
+            </Grupo>
+            {/* Progreso global: una sola barra en vez de una por misión.
+                Antes cada fila llevaba su propia barra, lo que hacía la
+                sección más ruidosa que informativa. */}
+            <BarraProgreso
+              hechas={misiones.filter((x) => x.hecho).length}
+              total={misiones.length}
+            />
+          </Seccion>
         )}
 
         {/* Celebración con confeti: una sola vez al completar las misiones */}
-        {festejo && (
-          <Celebracion T={T} est={est} onCerrar={() => setFestejo(false)} />
+        {festejo && <Celebracion T={T} onCerrar={() => setFestejo(false)} />}
+
+        {/* Accesos anclados: los que el usuario eligió, SIEMPRE en el mismo
+            sitio y en el mismo orden. Nunca una lista automática por
+            frecuencia: si el orden cambia solo, se pierde la memoria muscular
+            y el usuario pasa de mirar a leer. */}
+        {!accesosOcultos && ancladas.length > 0 && (
+          <View style={{ marginBottom: T.esps.xl }}>
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: T.esps.md,
+              }}
+            >
+              <Txt escala="micro" tono="suave" fuerte mayus>
+                Tus accesos
+              </Txt>
+              <Pressable
+                onPress={async () => {
+                  setAccesosOcultos(true);
+                  await guardarAccesosOcultos(true);
+                }}
+                hitSlop={10}
+                accessibilityLabel="Ocultar accesos"
+                style={{ minHeight: 32, justifyContent: "center" }}
+              >
+                <Txt escala="pie" tono="tenue">
+                  Ocultar
+                </Txt>
+              </Pressable>
+            </View>
+            <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+              {ancladas.map((id) => {
+                const h = herramientaPorId(id);
+                if (!h || !visible(id)) return null;
+                const badge = id === "pedidos" ? pedidosNuevos : 0;
+                return (
+                  <Pressable
+                    key={id}
+                    onPress={() => abrir(id)}
+                    accessibilityRole="button"
+                    accessibilityLabel={
+                      badge > 0 ? `${h.titulo}, ${badge} pendientes` : h.titulo
+                    }
+                    style={({ pressed }) => ({
+                      flex: 1,
+                      alignItems: "center",
+                      gap: T.esps.sm,
+                      paddingVertical: T.esps.md,
+                      paddingHorizontal: T.esps.xs,
+                      borderRadius: T.radio,
+                      backgroundColor: T.superficie,
+                      opacity: pressed ? 0.85 : 1,
+                      minHeight: 84,
+                    })}
+                  >
+                    <View
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: T.radioChico,
+                        backgroundColor: T.acentoSuave,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
+                    >
+                      <IconoUI id={h.icono} size={19} color={T.acento} />
+                      {badge > 0 ? (
+                        <View
+                          style={{
+                            position: "absolute",
+                            top: -4,
+                            right: -4,
+                            backgroundColor: T.peligro,
+                            borderRadius: T.radioPildora,
+                            minWidth: 17,
+                            height: 17,
+                            alignItems: "center",
+                            justifyContent: "center",
+                            paddingHorizontal: 4,
+                          }}
+                        >
+                          <Txt escala="micro" fuerte estilo={{ color: T.peligroTextoFuerte, fontSize: 9 }}>
+                            {badge > 9 ? "9+" : String(badge)}
+                          </Txt>
+                        </View>
+                      ) : null}
+                    </View>
+                    <Txt
+                      escala="micro"
+                      tono="suave"
+                      lineas={2}
+                      estilo={{ textAlign: "center" }}
+                    >
+                      {h.titulo}
+                    </Txt>
+                  </Pressable>
+                );
+              })}
+            </View>
+          </View>
         )}
 
-        {/* Accesos rápidos */}
-        <Text style={est.seccion}>TU NEGOCIO</Text>
-        <View style={est.accesos}>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => setDeptosAbierto(true)}
-          >
-            <IconoUI id="etiqueta" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Departamentos</Text>
-              <Text style={est.accesoMeta}>Crea categorías con su icono y color</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => router.push("/inventario")}
-          >
-            <IconoUI id="inventario" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Productos</Text>
-              <Text style={est.accesoMeta}>Agrega productos con foto y precio</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => setProveedoresAbierto(true)}
-          >
-            <IconoUI id="camion" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Proveedores</Text>
-              <Text style={est.accesoMeta}>Compras, días de visita y su historial</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => setCotizacionesAbierto(true)}
-          >
-            <IconoUI id="cotizacion" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Cotizaciones</Text>
-              <Text style={est.accesoMeta}>Arma un precio sin cobrar y compártelo</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => setDineroAbierto(true)}
-          >
-            <IconoUI id="dinero" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Dinero</Text>
-              <Text style={est.accesoMeta}>Tus gastos del negocio y de casa</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          <Pressable
-            style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-            onPress={() => setEtiquetasAbierto(true)}
-          >
-            <IconoUI id="etiqueta_nom" size={21} color={T.acento} />
-            <View style={{ flex: 1 }}>
-              <Text style={est.accesoTitulo}>Etiquetado NOM</Text>
-              <Text style={est.accesoMeta}>¿Tu producto necesita sellos de advertencia?</Text>
-            </View>
-            <Text style={est.accesoFlecha}>→</Text>
-          </Pressable>
-          {etiquetasAbierto && (
-        <ModalEtiquetas onCerrar={() => setEtiquetasAbierto(false)} />
-          )}
-          {lealtadActiva && (
-            <Pressable
-              style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-              onPress={() => setLealtadAbierto(true)}
-            >
-              <IconoUI id="regalo" size={21} color={T.acento} />
-              <View style={{ flex: 1 }}>
-                <Text style={est.accesoTitulo}>Clientes y lealtad</Text>
-                <Text style={est.accesoMeta}>Puntos por compra y visita, canjeables al cobrar</Text>
-              </View>
-              <Text style={est.accesoFlecha}>→</Text>
-            </Pressable>
-          )}
-          {modoUso !== "monitor" && (
-            <Pressable
-              style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-              onPress={() => setTiendaAbierto(true)}
-            >
-              <IconoUI id="tienda" size={21} color={T.acento} />
-              <View style={{ flex: 1 }}>
-                <Text style={est.accesoTitulo}>Tienda en línea</Text>
-                <Text style={est.accesoMeta}>Tu escaparate en internet con pedidos por WhatsApp</Text>
-              </View>
-              <Text style={est.accesoFlecha}>→</Text>
-            </Pressable>
-          )}
-          {modoUso !== "monitor" && (
-            <Pressable
-              style={({ pressed }) => [est.acceso, pressed && { backgroundColor: T.superficie3 }]}
-              onPress={() => setPedidosWebAbierto(true)}
-            >
-              <IconoUI id="pedido" size={21} color={T.acento} />
-              <View style={{ flex: 1 }}>
-                <Text style={est.accesoTitulo}>Pedidos web</Text>
-                <Text style={est.accesoMeta}>Los que te piden desde tu tienda en internet</Text>
-              </View>
-              {pedidosNuevos > 0 && (
-                <View
-                  style={{
-                    backgroundColor: T.peligro,
-                    borderRadius: 999,
-                    minWidth: 24,
-                    height: 24,
-                    alignItems: "center",
-                    justifyContent: "center",
-                    paddingHorizontal: 7,
-                  }}
-                >
-                  <Text style={{ color: "#ffffff", fontSize: 12, fontWeight: "900" }}>
-                    {pedidosNuevos > 99 ? "99+" : pedidosNuevos}
-                  </Text>
-                </View>
-              )}
-              <Text style={est.accesoFlecha}>→</Text>
-            </Pressable>
-          )}
-        </View>
+        {/* Variante B: el cajón vive en el cuerpo, con el resto del contenido. */}
+        {VARIANTE_PANEL === "cajon" && (
+          <View style={{ marginBottom: T.esps.xl }}>
+            <CajonHerramientas
+              onAbrir={() => setPanelAbierto(true)}
+              cuantas={TODAS_HERRAMIENTAS.filter((h) => visible(h.id)).length}
+            />
+          </View>
+        )}
 
-        {/* Últimas ventas */}
-        <Text style={est.seccion}>ÚLTIMAS VENTAS</Text>
-        {recientes.length === 0 ? (
-          <Text style={est.vacio}>Aún no hay ventas. ¡A vender!</Text>
+        {/* Última venta: UNA línea, no una lista. Resuelve el caso real
+            ("¿sí pasó el cobro?") sin convertir el tablero en un historial.
+            El historial completo vive en Reportes. */}
+        {recientes.length > 0 ? (
+          <View style={{ marginBottom: T.esps.xl }}>
+            <Grupo>
+              <Fila
+                titulo="Última venta"
+                meta={`${fmtFecha(recientes[0].creado_en)} · ${
+                  recientes[0].articulos
+                } artículo${recientes[0].articulos === 1 ? "" : "s"}`}
+                icono={<Monto texto={`#${recientes[0].folio}`} escala="micro" tono="tenue" />}
+                valor={<Monto texto={pesos(recientes[0].total_centavos)} escala="cuerpo" />}
+                onPress={() => router.push("/reportes")}
+              />
+            </Grupo>
+          </View>
         ) : (
-          recientes.map((v) => (
-            <View key={v.id} style={est.ventaFila}>
-              <View style={est.ventaFolio}>
-                <Text style={est.ventaFolioTxt}>#{v.folio}</Text>
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={est.ventaHora}>{fmtFecha(v.creado_en)}</Text>
-                <Text style={est.ventaArt}>
-                  {v.articulos} artículo{v.articulos === 1 ? "" : "s"}
-                </Text>
-              </View>
-              <Text style={est.ventaTotal}>{pesos(v.total_centavos)}</Text>
-            </View>
-          ))
+          <View style={{ marginBottom: T.esps.xl }}>
+            <Grupo>
+              <Vacio
+                titulo="Aún no hay ventas"
+                texto="Cuando cobres tu primer ticket aparecerá aquí."
+                accion={
+                  modoUso !== "monitor"
+                    ? { texto: "Ir a vender", onPress: () => router.push("/vender") }
+                    : undefined
+                }
+              />
+            </Grupo>
+          </View>
         )}
 
-        <View style={{ height: 30 }} />
-      </ScrollView>
+        {/* Aire extra para que el tirador no tape el último elemento. */}
+        {VARIANTE_PANEL === "tirador" ? <View style={{ height: 76 }} /> : null}
 
-      {deptosAbierto && (
-        <ModalDepartamentos
-          onCerrar={() => setDeptosAbierto(false)}
-          onCambio={cargar}
-        />
+      </Pantalla>
+
+      {/* Variante A: tirador fijo. Siempre visible, siempre en el pulgar. */}
+      {VARIANTE_PANEL === "tirador" && (
+        <TiradorHerramientas onAbrir={() => setPanelAbierto(true)} />
       )}
-      {proveedoresAbierto && (
-        <ModalProveedores
-          onCerrar={() => setProveedoresAbierto(false)}
-          onCambio={cargar}
-        />
+
+      <PanelHerramientas
+        visible={panelAbierto}
+        onCerrar={() => setPanelAbierto(false)}
+        visibleId={visible}
+        onAncladasCambio={setAncladas}
+        badges={pedidosNuevos > 0 ? { pedidos: pedidosNuevos } : undefined}
+        onAbrir={(id) => {
+          setPanelAbierto(false);
+          abrir(id);
+        }}
+      />
+
+      {/* --- Corte del turno (ya no es un Alert nativo) --- */}
+      <HojaCorte
+        visible={corte !== null}
+        corte={corte}
+        turno={turno}
+        conteoCiegoActivo={conteoCiegoActivo}
+        onSeguir={() => setCorte(null)}
+        onCerrarTurno={confirmarCierre}
+      />
+
+      {/* --- Herramientas --- */}
+      {abierta === "departamentos" && (
+        <ModalDepartamentos onCerrar={cerrarHerramienta} onCambio={cargar} />
       )}
-      {lealtadAbierto && (
-        <ModalLealtad
-          onCerrar={() => setLealtadAbierto(false)}
-          onCambio={cargar}
-        />
+      {abierta === "proveedores" && (
+        <ModalProveedores onCerrar={cerrarHerramienta} onCambio={cargar} />
       )}
-      {cotizacionesAbierto && (
+      {abierta === "cotizaciones" && (
         <ModalCotizaciones
-          onCerrar={() => setCotizacionesAbierto(false)}
+          onCerrar={cerrarHerramienta}
           onIrAVenta={() => {
-            setCotizacionesAbierto(false);
+            setAbierta(null);
             router.push("/vender");
           }}
         />
       )}
-      {dineroAbierto && (
-        <ModalDinero
-          onCerrar={() => {
-            setDineroAbierto(false);
-            cargar();
-          }}
-        />
+      {abierta === "dinero" && <ModalDinero onCerrar={cerrarYRecargar} />}
+      {/* Antes este modal se renderizaba POR ERROR en medio de la lista de
+          accesos, entre dos filas. Su sitio es aquí, con los demás. */}
+      {abierta === "etiquetas" && <ModalEtiquetas onCerrar={cerrarHerramienta} />}
+      {abierta === "recetas" && <ModalRecetas onCerrar={cerrarYRecargar} />}
+      {abierta === "credito" && <ModalCredito onCerrar={cerrarYRecargar} />}
+      {abierta === "lealtad" && (
+        <ModalLealtad onCerrar={cerrarHerramienta} onCambio={cargar} />
       )}
-      {tiendaAbierto && (
-        <ModalTienda
-          onCerrar={() => setTiendaAbierto(false)}
-          onCambio={cargar}
-        />
+      {abierta === "tienda" && (
+        <ModalTienda onCerrar={cerrarHerramienta} onCambio={cargar} />
       )}
-      {pedidosWebAbierto && (
-        <ModalPedidosWeb
-          onCerrar={() => setPedidosWebAbierto(false)}
-          onCambio={cargar}
-        />
+      {abierta === "pedidos" && (
+        <ModalPedidosWeb onCerrar={cerrarHerramienta} onCambio={cargar} />
       )}
-      {syncAbierto && (
-        <ModalSync onCerrar={() => setSyncAbierto(false)} onCambio={cargar} />
-      )}
+
+      {/* --- Modales de contexto --- */}
+      {syncAbierto && <ModalSync onCerrar={() => setSyncAbierto(false)} onCambio={cargar} />}
       {usuariosAbierto && (
         <ModalUsuarios
           modo="cambiar"
@@ -789,233 +1297,32 @@ export default function InicioScreen() {
   );
 }
 
-function crearEstilos(T: Tema) {
-  // Profundidad sutil para las tarjetas: casi imperceptible, pero ordena.
-  const sombraSuave: ViewStyle = {
-    shadowColor: "#000",
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  };
-  // Cifras alineadas: no "bailan" al cambiar.
-  const cifras: TextStyle = { fontVariant: ["tabular-nums"] };
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp, paddingTop: 12 },
-    marca: { color: T.texto, fontSize: 13, fontWeight: "900", letterSpacing: 1.5, opacity: 0.85 },
-    saludo: { color: T.texto, fontSize: 27, fontWeight: "800", letterSpacing: -0.7, marginTop: 1, marginBottom: 16 },
-
-    heroCaja: {
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderLeftWidth: 4,
-      borderLeftColor: T.acento,
-      borderRadius: T.radioGrande,
-      padding: 22,
-      marginBottom: 14,
-      ...sombraSuave,
-    },
-    heroLbl: { color: T.textoSuave, fontSize: 11, fontWeight: "800", letterSpacing: 1 },
-    heroVal: { color: T.texto, fontSize: 42, fontWeight: "800", letterSpacing: -1.5, marginTop: 4, ...cifras },
-    heroFila: { flexDirection: "row", alignItems: "center", marginTop: 14 },
-    heroDato: { flex: 1 },
-    heroDatoVal: { color: T.texto, fontSize: 18, fontWeight: "800", ...cifras },
-    heroDatoLbl: { color: T.textoSuave, fontSize: 12, marginTop: 1 },
-    heroSep: { width: 1, height: 30, backgroundColor: T.bordeFuerte, marginRight: 16 },
-
-    turnoCaja: {
-      flexDirection: "row",
-      alignItems: "center",
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderRadius: T.radio,
-      padding: 16,
-      marginBottom: 22,
-      gap: 12,
-      ...sombraSuave,
-    },
-    turnoFila: { flexDirection: "row", alignItems: "center", gap: 7 },
-    puntoVivo: { width: 9, height: 9, borderRadius: 5, backgroundColor: T.exito },
-    turnoTitulo: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    turnoMeta: { color: T.textoTenue, fontSize: 12, marginTop: 3 },
-    turnoBtn: {
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      borderRadius: T.radioChico,
-      paddingHorizontal: 18,
-      paddingVertical: 10,
-    },
-    turnoBtnTxt: { color: T.turquesa, fontSize: 14, fontWeight: "800" },
-    turnoBtnIcono: {
-      width: 40,
-      height: 40,
-      borderRadius: T.radioChico,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-
-    seccion: {
-      color: T.textoSuave,
-      fontSize: 11,
-      fontWeight: "800",
-      letterSpacing: 1,
-      marginBottom: 10,
-    },
-    vacio: { color: T.textoTenue, fontSize: 14, marginTop: 6 },
-    ventaFila: {
-      flexDirection: "row",
-      alignItems: "center",
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderRadius: T.radio,
-      padding: 12,
-      marginBottom: 8,
-      gap: 12,
-      ...sombraSuave,
-    },
-    ventaFolio: {
-      backgroundColor: T.superficie2,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      borderRadius: T.radioChico,
-      paddingHorizontal: 10,
-      paddingVertical: 8,
-    },
-    ventaFolioTxt: { color: T.acento, fontSize: 13, fontWeight: "800" },
-    ventaHora: { color: T.texto, fontSize: 13, fontWeight: "600" },
-    ventaArt: { color: T.textoTenue, fontSize: 12, marginTop: 1 },
-    ventaTotal: { color: T.turquesa, fontSize: 16, fontWeight: "800", ...cifras },
-    accesos: { gap: 8, marginBottom: 22 },
-    acceso: {
-      flexDirection: "row", alignItems: "center", gap: 13,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 15, ...sombraSuave,
-    },
-    accesoIcono: { fontSize: 22 },
-    accesoTitulo: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    accesoMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    accesoFlecha: { color: T.turquesa, fontSize: 16, fontWeight: "800" },
-    usuarioFila: {
-      flexDirection: "row", alignItems: "center", gap: 10,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radioChico + 2, paddingHorizontal: 12, paddingVertical: 9,
-      marginBottom: 14,
-    },
-    usuarioAvatar: {
-      width: 28, height: 28, borderRadius: 9,
-      backgroundColor: T.acento + "26", borderWidth: 1, borderColor: T.acento + "55",
-      alignItems: "center", justifyContent: "center",
-    },
-    usuarioInicial: { color: T.acento, fontSize: 13, fontWeight: "800" },
-    usuarioTxt: { flex: 1, color: T.textoSuave, fontSize: 13 },
-    usuarioCambiar: { color: T.turquesa, fontSize: 12.5, fontWeight: "800" },
-    syncFila: {
-      flexDirection: "row", alignItems: "center", gap: 9,
-      borderWidth: 1, borderRadius: T.radioChico + 2,
-      paddingHorizontal: 12, paddingVertical: 9, marginBottom: 14,
-    },
-    syncPunto: { width: 8, height: 8, borderRadius: 4 },
-    syncTxt: { flex: 1, color: T.textoSuave, fontSize: 12.5, fontWeight: "600" },
-    syncVer: { color: T.turquesa, fontSize: 12.5, fontWeight: "800" },
-
-    // Aviso de visita de proveedores (junta con la tarjeta de turno)
-    avisoProv: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie,
-      borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 14, marginBottom: 22,
-      ...sombraSuave,
-    },
-    avisoProvIcono: {
-      width: 38, height: 38, borderRadius: 11,
-      backgroundColor: T.acento + "1f", borderWidth: 1, borderColor: T.acento + "44",
-      alignItems: "center", justifyContent: "center",
-    },
-    avisoProvTxt: { color: T.textoSuave, fontSize: 14 },
-    avisoProvMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    avisoProvFlecha: { color: T.turquesa, fontSize: 15, fontWeight: "800" },
-
-    // Tu arranque (misiones)
-    arranqueCab: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      marginBottom: 10,
-    },
-    arranqueConteo: { color: T.acento, fontSize: 12, fontWeight: "800" },
-    misiones: { gap: 8, marginBottom: 22 },
-    mision: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 12,
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderRadius: T.radio,
-      padding: 14,
-      ...sombraSuave,
-    },
-    misionHecha: { borderColor: T.exito + "66", backgroundColor: T.exitoSuave + "33" },
-    misionIcono: {
-      width: 38,
-      height: 38,
-      borderRadius: 11,
-      backgroundColor: T.acento + "1f",
-      borderWidth: 1,
-      borderColor: T.acento + "44",
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    misionPaloma: { color: T.exito, fontSize: 17, fontWeight: "800" },
-    misionTituloFila: {
-      flexDirection: "row",
-      alignItems: "center",
-      justifyContent: "space-between",
-      gap: 8,
-    },
-    misionTitulo: { flex: 1, color: T.texto, fontSize: 14.5, fontWeight: "800" },
-    misionProgreso: { color: T.acento, fontSize: 12, fontWeight: "800", ...cifras },
-    barra: {
-      height: 6,
-      borderRadius: 3,
-      backgroundColor: T.superficie3,
-      marginTop: 9,
-      overflow: "hidden",
-    },
-    barraRelleno: {
-      height: 6,
-      borderRadius: 3,
-      backgroundColor: T.acento,
-      minWidth: 0,
-    },
-    misionDetalle: { color: T.textoTenue, fontSize: 12, marginTop: 7, lineHeight: 17 },
-    misionFlecha: { color: T.turquesa, fontSize: 15, fontWeight: "800" },
-
-    // Celebración una sola vez
-    festejoWrap: {
-      overflow: "visible",
-      paddingTop: 76,   // espacio para la ráfaga de confeti sobre la tarjeta
-      marginTop: -54,   // sin empujar de más el contenido de abajo
-      marginBottom: 22,
-    },
-    festejoCaja: {
-      backgroundColor: T.exitoSuave,
-      borderWidth: 1,
-      borderColor: T.exito,
-      borderRadius: T.radioGrande,
-      padding: 20,
-      gap: 8,
-      ...sombraSuave,
-    },
-    festejoTitulo: { color: T.exitoTexto, fontSize: 16, fontWeight: "900" },
-    festejoTxt: { color: T.exitoTexto, fontSize: 13.5, lineHeight: 20, marginBottom: 6 },
-  });
+// ---------------------------------------------------------------------------
+function BarraProgreso({ hechas, total }: { hechas: number; total: number }) {
+  const { tema: T } = useTema();
+  const pct = total > 0 ? Math.round((hechas / total) * 100) : 0;
+  return (
+    <View style={{ marginTop: T.esps.md }}>
+      <View
+        style={{
+          height: 6,
+          backgroundColor: T.superficie2,
+          borderRadius: 3,
+          overflow: "hidden",
+        }}
+      >
+        <View
+          style={{
+            height: "100%",
+            width: `${pct}%`,
+            backgroundColor: T.acento,
+            borderRadius: 3,
+          }}
+        />
+      </View>
+      <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.sm }}>
+        {hechas} de {total} listo{hechas === 1 ? "" : "s"}
+      </Txt>
+    </View>
+  );
 }

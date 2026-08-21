@@ -8,16 +8,49 @@
 // La pantalla "Mejorar" calcula EXACTAMENTE cuánto hay que bajar de cada
 // ingrediente para perder cada sello, contando que quitar azúcar o grasa
 // también baja las calorías.
+//
+// ---------------------------------------------------------------------------
+// LOS SELLOS SVG NO SE TOCAN — Y ES A PROPÓSITO
+// ---------------------------------------------------------------------------
+// SelloSVG, SelloNumeroSVG y LeyendaSVG dibujan negro sobre blanco siempre,
+// sin importar el tema activo. No es una decisión de estilo: son las
+// proporciones y colores que exige el Apéndice A de la norma oficial. Un
+// sello NOM-051 en el color de acento del usuario dejaría de ser un sello
+// válido. Migrarlos al sistema de temas habría sido un error, no una mejora.
+//
+// ---------------------------------------------------------------------------
+// QUÉ SÍ CAMBIÓ
+// ---------------------------------------------------------------------------
+// 1. "Eliminar esta etiqueta" borraba de un solo toque, sin confirmación
+//    de ningún tipo. Se agregó una <Hoja> de confirmación, igual que en el
+//    resto de la app.
+// 2. Insignias de sustitución (SEGURA / CON AVISO / NO SE ACONSEJA): el
+//    texto blanco fijo sobre el fondo de nivel FALLABA contraste de verdad
+//    en tema oscuro — se midió, no se asumió: blanco sobre "alerta oscuro"
+//    da 2.17:1 (el mínimo es 4.5), sobre "peligro oscuro" 2.78:1, y sobre
+//    "éxito oscuro" ni el blanco (3.80) ni la tinta oscura (4.42) alcanzan
+//    por sí solos. Se resolvió con texto oscuro para alerta/peligro en modo
+//    oscuro (ambos pasan con holgura) y una variante de jade un poco más
+//    profunda SOLO para este relleno de insignia en oscuro (contraste 5.51
+//    con blanco) — sin tocar el T.exito que usa el resto de la app.
+// 3. Nueve fallbacks defensivos muertos (`T.alerta ?? "#f59e0b"`,
+//    `T.acentoTexto ?? "#fff"`, `T.superficie2 ?? T.superficie3`…): esos
+//    campos siempre existen en el tema actual, así que el fallback nunca se
+//    ejecutaba. Limpiados a la referencia directa.
+// 4. Las casillas y radios usaban `T.acento` crudo con marca blanca fija —
+//    el mismo bug de contraste con acentos claros ("Perla") que ya se
+//    corrigió en el resto de la app. Ahora usan `T.acentoRelleno` +
+//    `T.acentoTexto`.
+// 5. BackHandler para las 6 sub-vistas (lista/calc/mejorar/etiqueta/
+//    checklist/trámites): sin él, Atrás cerraba todo el modal en vez de
+//    retroceder un nivel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  View, Text, TextInput, Pressable, StyleSheet, Modal, ScrollView,
-  KeyboardAvoidingView, Platform, ActivityIndicator, Share,
-} from "react-native";
+import { View, Text, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Share, BackHandler } from "react-native";
 import Svg, { Polygon, Rect, Text as SvgText } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, Campo, useEstiloInput } from "@/src/componentes/ui";
+import { Boton, Banner, CabeceraModal, Campo, Hoja, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
 import {
   calcularSellos, compararFases, faseVigente, reglasImpresion,
   sugerenciasParaQuitarSellos, EXENCIONES, CHECKLIST_ETIQUETA, TRAMITES,
@@ -37,9 +70,7 @@ type Tema = ReturnType<typeof useTema>["tema"];
 type Vista = "lista" | "calc" | "mejorar" | "etiqueta" | "checklist" | "tramites";
 
 // ───────────────────────────────────────────────────────────────────────────
-// Sello dibujado con las proporciones del Apéndice A (Figura A2):
-// 64x de ancho × 72x de alto; octágono de 56x × 62x; franja de 10x abajo con
-// "SECRETARÍA DE SALUD"; tipografía del mensaje 6x, interlineado 4x.
+// Sellos SVG — proporciones del Apéndice A. NO USAN T (tema). Ver nota arriba.
 // ───────────────────────────────────────────────────────────────────────────
 
 function envolver(texto: string, max: number): string[] {
@@ -123,7 +154,6 @@ function LeyendaSVG({ texto, ancho = 280 }: { texto: string; ancho?: number }) {
 
 export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
 
   const [vista, setVista] = useState<Vista>("lista");
@@ -132,6 +162,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
   const [avanzado, setAvanzado] = useState(false);
+  const [confirmandoBorrado, setConfirmandoBorrado] = useState(false);
 
   // Perfil en edición (siempre hay uno, aunque no se haya guardado).
   const [p, setP] = useState<Partial<PerfilEtiqueta>>({ ...PERFIL_VACIO });
@@ -143,6 +174,23 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
   }, []);
 
   useEffect(() => { void cargar(); }, [cargar]);
+
+  // Atrás del sistema: retrocede un nivel en vez de cerrar todo el modal.
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (vista === "mejorar" || vista === "etiqueta" || vista === "checklist") {
+        setVista("calc");
+        return true;
+      }
+      if (vista === "calc" || vista === "tramites") {
+        setVista("lista");
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+  }, [vista]);
 
   const datos: DatosNutrimentales = useMemo(() => ({
     tipo: p.tipo === "liquido" ? "liquido" : "solido",
@@ -201,10 +249,14 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     }
   }
 
-  async function borrar() {
-    if (!p.id) return setVista("lista");
+  async function confirmarBorrado() {
+    if (!p.id) {
+      setConfirmandoBorrado(false);
+      return setVista("lista");
+    }
     await eliminarPerfil(p.id);
     await cargar();
+    setConfirmandoBorrado(false);
     setVista("lista");
   }
 
@@ -221,32 +273,35 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   function VistaLista() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
-        <View style={est.vigencia}>
-          <View style={est.vigPunto} />
-          <Text style={est.vigTxt}>
-            Vigente: <Text style={{ fontWeight: "800", color: T.texto }}>Fase {faseVigente()}</Text> ·
-            la Fase 3 aplica desde el 1 de enero de 2028
-          </Text>
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
+        <View
+          style={{
+            flexDirection: "row", alignItems: "center", gap: T.esps.sm,
+            padding: T.esps.md, borderRadius: T.radio,
+            backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
+          }}
+        >
+          <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: T.exito }} />
+          <Txt escala="micro" tono="tenue" estilo={{ flex: 1 }}>
+            Vigente: <Txt escala="micro" fuerte>Fase {faseVigente()}</Txt> · la Fase 3 aplica desde
+            el 1 de enero de 2028
+          </Txt>
         </View>
-        <Text style={est.vigFecha}>Verificado contra el texto oficial el {FECHA_VERIFICACION}</Text>
+        <Txt escala="micro" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.xs }}>
+          Verificado contra el texto oficial el {FECHA_VERIFICACION}
+        </Txt>
 
-        <View style={{ marginTop: 14, marginBottom: 16 }}>
+        <View style={{ marginTop: T.esps.lg, marginBottom: T.esps.lg }}>
           <Boton titulo="+ Calcular un producto" onPress={nuevo} />
         </View>
 
         {cargando ? (
-          <ActivityIndicator color={T.acento} style={{ marginTop: 24 }} />
+          <ActivityIndicator color={T.acento} style={{ marginTop: T.esps.xl }} />
         ) : perfiles.length === 0 ? (
-          <View style={est.arranque}>
-            <Text style={est.arranqueH}>¿Tu producto necesita sellos?</Text>
-            <Text style={est.arranqueP}>
-              Si fabricas lo que vendes — postres, panadería, conservas, salsas — captura cinco
-              números y te digo qué sellos te tocan, de qué tamaño van en tu envase, y qué tendrías
-              que ajustar para quitártelos.
-            </Text>
-            <Text style={est.arranqueNota}>Todo el cálculo se hace en tu teléfono.</Text>
-          </View>
+          <Vacio
+            titulo="¿Tu producto necesita sellos?"
+            texto="Si fabricas lo que vendes — postres, panadería, conservas, salsas — captura cinco números y te digo qué sellos te tocan, de qué tamaño van en tu envase, y qué tendrías que ajustar para quitártelos. Todo el cálculo se hace en tu teléfono."
+          />
         ) : (
           perfiles.map((x) => {
             const r = calcularSellos({
@@ -259,32 +314,41 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
             });
             const n = r.sellos.length;
             return (
-              <Pressable key={x.id}
-                style={({ pressed }) => [est.fila, pressed && { backgroundColor: T.superficie3 }]}
+              <Pressable
+                key={x.id}
                 onPress={() => abrir(x)}
+                style={({ pressed }) => [
+                  { flexDirection: "row", alignItems: "center", gap: T.esps.md, backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde, borderRadius: T.radio, padding: T.esps.md, marginBottom: T.esps.sm },
+                  pressed && { backgroundColor: T.superficie3 },
+                ]}
               >
-                <View style={[est.filaCont, n === 0 && { backgroundColor: T.exito + "22" }]}>
-                  <Text style={[est.filaContTxt, n === 0 && { color: T.exito }]}>{n}</Text>
+                <View
+                  style={{
+                    width: 34, height: 34, borderRadius: T.radioChico, alignItems: "center", justifyContent: "center",
+                    backgroundColor: n === 0 ? T.exitoSuave : T.peligroSuave,
+                  }}
+                >
+                  <Monto texto={String(n)} escala="cuerpo" tono={n === 0 ? "exito" : "peligro"} />
                 </View>
                 <View style={{ flex: 1, minWidth: 0 }}>
-                  <Text style={est.filaNombre} numberOfLines={1}>{x.nombre}</Text>
-                  <Text style={est.filaMeta}>
+                  <Txt escala="cuerpo" fuerte lineas={1}>{x.nombre}</Txt>
+                  <Txt escala="micro" tono="tenue">
                     {x.tipo === "liquido" ? "Líquido" : "Sólido"} ·{" "}
                     {r.motivo === "exento" ? "exento"
                       : r.motivo === "sin_anadidos" ? "sin añadidos"
                       : n === 0 ? "sin sellos" : `${n} sello${n > 1 ? "s" : ""}`}
-                  </Text>
+                  </Txt>
                 </View>
-                <Text style={est.flecha}>→</Text>
+                <Txt escala="titulo" tono="tenue">›</Txt>
               </Pressable>
             );
           })
         )}
 
-        <View style={{ marginTop: 20 }}>
+        <View style={{ marginTop: T.esps.xl }}>
           <Boton titulo="¿Qué trámites necesito?" tipo="secundario" onPress={() => setVista("tramites")} />
         </View>
-        <View style={{ height: 40 }} />
+        <View style={{ height: T.esps.xxl }} />
       </ScrollView>
     );
   }
@@ -295,7 +359,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     const exento = (p.exencion ?? "ninguna") !== "ninguna";
     const u = p.tipo === "liquido" ? "ml" : "g";
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
 
         <Campo label="¿Qué producto es?">
@@ -303,39 +367,41 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
             placeholder="Ej. Galletas de avena" placeholderTextColor={T.textoTenue} />
         </Campo>
 
-        <View style={est.segmento}>
-          {(["solido", "liquido"] as const).map((t) => (
-            <Pressable key={t} style={[est.segBtn, p.tipo === t && { backgroundColor: T.acento }]}
-              onPress={() => set("tipo", t)}>
-              <Text style={[est.segTxt, p.tipo === t && { color: T.acentoTexto ?? "#fff" }]}>
-                {t === "solido" ? "Sólido (100 g)" : "Líquido (100 ml)"}
-              </Text>
-            </Pressable>
-          ))}
-        </View>
+        <Segmentado
+          opciones={[
+            { id: "solido", label: "Sólido (100 g)" },
+            { id: "liquido", label: "Líquido (100 ml)" },
+          ]}
+          valor={p.tipo ?? "solido"}
+          onCambio={(v) => set("tipo", v)}
+        />
 
         {!exento && (
           <>
-            <Text style={est.lbl}>¿QUÉ LE AGREGASTE?</Text>
-            <Text style={est.hint}>
-              Define qué sellos se evalúan. Sin nada añadido no hay sellos, aunque sea alto en
-              azúcar natural.
-            </Text>
+            <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginTop: T.esps.lg, marginBottom: T.esps.xs }}>
+              ¿Qué le agregaste durante la elaboración?
+            </Txt>
+            <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.sm }}>
+              Márcalo si el ingrediente ESTÁ en tu receta — la cantidad de
+              siempre, no algo extra aparte de eso. Si tu lista lleva azúcar,
+              aceite o sal, es un nutriente añadido y cuenta, aunque sea la
+              medida normal de la receta. Lo que NO cuenta es lo que el
+              propio ingrediente ya trae por su naturaleza (la lactosa de la
+              leche, el azúcar de una fruta) — eso no lleva sello aunque el
+              número salga alto.
+            </Txt>
             {([
               ["anade_azucares", "Azúcar, miel o jarabe"],
               ["anade_grasas", "Grasa, aceite o manteca"],
               ["anade_sodio", "Sal o algo con sodio"],
             ] as const).map(([k, txt]) => (
-              <Pressable key={k} style={est.check} onPress={() => set(k, p[k] ? 0 : 1)}>
-                <View style={[est.checkCaja, !!p[k] && { backgroundColor: T.acento, borderColor: T.acento }]}>
-                  {!!p[k] && <Text style={est.checkMarca}>✓</Text>}
-                </View>
-                <Text style={est.checkTxt}>{txt}</Text>
-              </Pressable>
+              <CheckFila key={k} label={txt} valor={!!p[k]} onCambio={() => set(k, p[k] ? 0 : 1)} />
             ))}
 
-            <Text style={est.lbl}>POR CADA 100 {u.toUpperCase()}</Text>
-            <View style={est.filaCampos}>
+            <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginTop: T.esps.lg, marginBottom: T.esps.sm }}>
+              Por cada 100 {u.toUpperCase()}
+            </Txt>
+            <View style={{ flexDirection: "row", gap: T.esps.sm }}>
               <View style={{ flex: 1 }}>
                 <Campo label="Calorías (kcal)">
                   <TextInput style={estiloInput} value={valNum(p.calorias_kcal)}
@@ -351,7 +417,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
                 </Campo>
               </View>
             </View>
-            <View style={est.filaCampos}>
+            <View style={{ flexDirection: "row", gap: T.esps.sm }}>
               <View style={{ flex: 1 }}>
                 <Campo label="Grasas saturadas (g)">
                   <TextInput style={estiloInput} value={valNum(p.grasas_saturadas_g)}
@@ -379,12 +445,12 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
         <Resultado />
 
         {/* Lo avanzado no estorba: se despliega solo si lo piden */}
-        <Pressable style={est.masBtn} onPress={() => setAvanzado((v) => !v)}>
-          <Text style={est.masTxt}>{avanzado ? "− Menos opciones" : "+ Más opciones"}</Text>
+        <Pressable onPress={() => setAvanzado((v) => !v)} style={{ paddingVertical: T.esps.md, alignItems: "center" }}>
+          <Txt escala="pie" tono="acento" fuerte>{avanzado ? "− Menos opciones" : "+ Más opciones"}</Txt>
         </Pressable>
 
         {avanzado && (
-          <View style={est.avanzado}>
+          <View style={{ padding: T.esps.md, borderRadius: T.radio, backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde }}>
             <Campo label="Tamaño del envase (cm²)" ayuda="La cara principal, la que ve el cliente. Define el tamaño del sello.">
               <TextInput style={estiloInput} value={valNum(p.area_cm2)}
                 onChangeText={(v) => setNum("area_cm2", v)} keyboardType="decimal-pad"
@@ -395,43 +461,34 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
               ["contiene_cafeina", "Lleva cafeína añadida"],
               ["contiene_edulcorantes", "Lleva edulcorantes"],
             ] as const).map(([k, txt]) => (
-              <Pressable key={k} style={est.check} onPress={() => set(k, p[k] ? 0 : 1)}>
-                <View style={[est.checkCaja, !!p[k] && { backgroundColor: T.acento, borderColor: T.acento }]}>
-                  {!!p[k] && <Text style={est.checkMarca}>✓</Text>}
-                </View>
-                <Text style={est.checkTxt}>{txt}</Text>
-              </Pressable>
+              <CheckFila key={k} label={txt} valor={!!p[k]} onCambio={() => set(k, p[k] ? 0 : 1)} />
             ))}
 
-            <Text style={est.lbl}>¿ES UN PRODUCTO EXENTO?</Text>
-            <Text style={est.hint}>
+            <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginTop: T.esps.lg, marginBottom: T.esps.xs }}>
+              ¿Es un producto exento?
+            </Txt>
+            <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.sm }}>
               Algunos productos no llevan sellos nunca, sin importar sus valores.
-            </Text>
+            </Txt>
             {EXENCIONES.map((x) => (
-              <Pressable key={x.id} style={est.radio} onPress={() => set("exencion", x.id)}>
-                <View style={[est.radioCaja, p.exencion === x.id && { borderColor: T.acento }]}>
-                  {p.exencion === x.id && <View style={[est.radioPunto, { backgroundColor: T.acento }]} />}
-                </View>
-                <Text style={est.checkTxt}>{x.n}</Text>
-              </Pressable>
+              <RadioFila key={x.id} label={x.n} activo={p.exencion === x.id} onPress={() => set("exencion", x.id)} />
             ))}
 
-            <Text style={est.lbl}>¿QUÉ TIPO DE RECETA ES?</Text>
-            <Text style={est.hint}>
+            <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginTop: T.esps.lg, marginBottom: T.esps.xs }}>
+              ¿Qué tipo de receta es?
+            </Txt>
+            <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.sm }}>
               Para que, si algún día quieres bajar un sello, la app sepa si el ingrediente que
               tocarías está ahí solo por sabor o si además conserva tu producto.
-            </Text>
+            </Txt>
             {CATEGORIAS_RECETA.map((c) => (
-              <Pressable key={c.id} style={est.radio}
-                onPress={() => set("categoria_receta", c.id)}>
-                <View style={[est.radioCaja, (p.categoria_receta ?? "otro") === c.id && { borderColor: T.acento }]}>
-                  {(p.categoria_receta ?? "otro") === c.id && <View style={[est.radioPunto, { backgroundColor: T.acento }]} />}
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={est.checkTxt}>{c.n}</Text>
-                  {!!c.ejemplos && <Text style={est.radioEjemplo}>{c.ejemplos}</Text>}
-                </View>
-              </Pressable>
+              <RadioFila
+                key={c.id}
+                label={c.n}
+                ejemplo={c.ejemplos}
+                activo={(p.categoria_receta ?? "otro") === c.id}
+                onPress={() => set("categoria_receta", c.id)}
+              />
             ))}
           </View>
         )}
@@ -445,11 +502,11 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     const r = resultado;
     if (r.motivo === "exento" || r.motivo === "sin_anadidos") {
       return (
-        <View style={est.ok}>
-          <Text style={est.okTitulo}>✓ No lleva sellos</Text>
-          <Text style={est.okNota}>{r.explicacion}</Text>
+        <View style={{ padding: T.esps.md, borderRadius: T.radio, marginTop: T.esps.lg, backgroundColor: T.exitoSuave, borderWidth: 1, borderColor: T.exito + "55" }}>
+          <Txt escala="pie" tono="exito" fuerte>✓ No lleva sellos</Txt>
+          <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.xs }}>{r.explicacion}</Txt>
           {r.leyendas.length > 0 && (
-            <View style={{ marginTop: 12, gap: 8 }}>
+            <View style={{ marginTop: T.esps.md, gap: T.esps.sm }}>
               {r.leyendas.map((l) => <LeyendaSVG key={l.id} texto={l.etiqueta} ancho={250} />)}
             </View>
           )}
@@ -459,17 +516,16 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     if (r.sellos.length === 0 && r.leyendas.length === 0) {
       const comp = compararFases(datos);
       return (
-        <View style={est.ok}>
-          <Text style={est.okTitulo}>✓ Con estos datos, no lleva sellos</Text>
+        <View style={{ padding: T.esps.md, borderRadius: T.radio, marginTop: T.esps.lg, backgroundColor: T.exitoSuave, borderWidth: 1, borderColor: T.exito + "55" }}>
+          <Txt escala="pie" tono="exito" fuerte>✓ Con estos datos, no lleva sellos</Txt>
           {comp.nuevos.length > 0 && (
-            <Text style={est.okNota}>
-              Ojo: a partir de 2028 tendría {comp.nuevos.length} sello
-              {comp.nuevos.length > 1 ? "s" : ""}.
-            </Text>
+            <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.xs }}>
+              Ojo: a partir de 2028 tendría {comp.nuevos.length} sello{comp.nuevos.length > 1 ? "s" : ""}.
+            </Txt>
           )}
-          <Text style={est.okNota}>
+          <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.xs }}>
             Puedes declararlo por escrito: «Este producto no contiene sellos ni leyendas» (4.1.4 Bis).
-          </Text>
+          </Txt>
         </View>
       );
     }
@@ -477,86 +533,81 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     const comp = compararFases(datos);
     const usaNumero = reglas.usaNumero && r.sellos.length > 0;
     return (
-      <View style={est.resultado}>
-        <Text style={est.resTitulo}>
+      <View style={{ marginTop: T.esps.lg }}>
+        <Txt escala="cuerpo" fuerte estilo={{ marginBottom: T.esps.md }}>
           {r.sellos.length > 0
             ? `Llevaría ${r.sellos.length} sello${r.sellos.length === 1 ? "" : "s"}`
             : "Llevaría estas leyendas"}
-        </Text>
+        </Txt>
 
         {usaNumero ? (
           <>
-            <View style={est.numAviso}>
-              <Text style={est.numAvisoTxt}>
+            <View style={{ padding: T.esps.sm, borderRadius: T.radio, marginBottom: T.esps.md, backgroundColor: T.acentoSuave, borderWidth: 1, borderColor: T.acento + "55" }}>
+              <Txt escala="pie">
                 Tu envase mide {reglas.area} cm². Por ser de 40 cm² o menos, va{" "}
-                <Text style={{ fontWeight: "800" }}>un solo sello con el número</Text> en vez de los
+                <Txt escala="pie" fuerte>un solo sello con el número</Txt> en vez de los
                 individuales (4.5.3.4.2).
-              </Text>
+              </Txt>
             </View>
-            <View style={est.sellosFila}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.md }}>
               <SelloNumeroSVG cuantos={r.sellos.length} size={120} />
             </View>
-            <View style={{ marginTop: 10, gap: 6 }}>
+            <View style={{ marginTop: T.esps.sm, gap: T.esps.xs }}>
               {r.sellos.map((s) => (
-                <Text key={s.id} style={est.razonFila}>
-                  <Text style={{ fontWeight: "700", color: T.texto }}>{s.etiqueta}</Text> — {s.razon}
-                </Text>
+                <Txt key={s.id} escala="pie" tono="tenue">
+                  <Txt escala="pie" fuerte>{s.etiqueta}</Txt> — {s.razon}
+                </Txt>
               ))}
             </View>
           </>
         ) : (
-          <View style={est.sellosFila}>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.md }}>
             {r.sellos.map((s) => (
-              <View key={s.id} style={est.selloCaja}>
+              <View key={s.id} style={{ alignItems: "center", width: 100 }}>
                 <SelloSVG texto={s.etiqueta} size={92} />
-                <Text style={est.selloRazon}>{s.razon}</Text>
+                <Txt escala="micro" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.xs }}>{s.razon}</Txt>
               </View>
             ))}
           </View>
         )}
 
         {r.leyendas.length > 0 && (
-          <View style={{ marginTop: 14, gap: 10 }}>
+          <View style={{ marginTop: T.esps.md, gap: T.esps.sm }}>
             {r.leyendas.map((l) => (
               <View key={l.id}>
                 <LeyendaSVG texto={l.etiqueta} ancho={280} />
-                <Text style={est.selloRazonIzq}>{l.razon}</Text>
+                <Txt escala="pie" tono="tenue" estilo={{ marginTop: T.esps.xs }}>{l.razon}</Txt>
               </View>
             ))}
           </View>
         )}
 
         {r.sellos.length > 0 && (
-          <View style={{ marginTop: 16 }}>
-            <Boton titulo="¿Cómo le quito un sello?" tipo="secundario"
-              onPress={() => setVista("mejorar")} />
+          <View style={{ marginTop: T.esps.lg }}>
+            <Boton titulo="¿Cómo le quito un sello?" tipo="secundario" onPress={() => setVista("mejorar")} />
           </View>
         )}
 
         {reglas.conocida && r.sellos.length > 0 && (
-          <View style={est.impresion}>
-            <Text style={est.impTitulo}>CÓMO VA EN TU ENVASE</Text>
-            <Text style={est.impFila}>
-              Tamaño de cada sello:{" "}
-              <Text style={{ fontWeight: "700", color: T.texto }}>
-                {reglas.ancho ? `${reglas.ancho} × ${reglas.alto} cm` : reglas.nota}
-              </Text>
-            </Text>
-            <Text style={est.impFila}>{reglas.ubicacion}</Text>
+          <View style={{ marginTop: T.esps.lg, padding: T.esps.md, borderRadius: T.radio, backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde }}>
+            <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>Cómo va en tu envase</Txt>
+            <Txt escala="pie" tono="tenue" estilo={{ marginBottom: 3 }}>
+              Tamaño de cada sello: <Txt escala="pie" fuerte>{reglas.ancho ? `${reglas.ancho} × ${reglas.alto} cm` : reglas.nota}</Txt>
+            </Txt>
+            <Txt escala="pie" tono="tenue" estilo={{ marginBottom: 3 }}>{reglas.ubicacion}</Txt>
             {r.sellos.length > 1 && !usaNumero && (
-              <Text style={est.impFila}>Van de izquierda a derecha, en el orden de arriba.</Text>
+              <Txt escala="pie" tono="tenue">Van de izquierda a derecha, en el orden de arriba.</Txt>
             )}
           </View>
         )}
 
         {comp.nuevos.length > 0 && (
-          <View style={est.futuro}>
-            <Text style={est.futuroTxt}>
-              <Text style={{ fontWeight: "800" }}>Desde el 1 de enero de 2028</Text> (Fase 3), este
-              mismo producto llevaría {comp.nuevos.length} sello
-              {comp.nuevos.length > 1 ? "s" : ""} más sin cambiarle nada:{" "}
-              {comp.nuevos.map((s) => s.etiqueta).join(", ")}.
-            </Text>
+          <View style={{ marginTop: T.esps.md, padding: T.esps.md, borderRadius: T.radio, backgroundColor: T.alertaSuave, borderWidth: 1, borderColor: T.alerta + "55" }}>
+            <Txt escala="pie">
+              <Txt escala="pie" fuerte>Desde el 1 de enero de 2028</Txt> (Fase 3), este mismo
+              producto llevaría {comp.nuevos.length} sello{comp.nuevos.length > 1 ? "s" : ""} más
+              sin cambiarle nada: {comp.nuevos.map((s) => s.etiqueta).join(", ")}.
+            </Txt>
           </View>
         )}
       </View>
@@ -568,11 +619,11 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
   function VistaMejorar() {
     const { sugerencias, quedariaLimpio, leyendasFijas } = sugerenciasParaQuitarSellos(datos);
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
-        <Text style={est.hint}>
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
+        <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.md }}>
           Estos son los números exactos para perder cada sello. Al bajar azúcar o grasa también
           bajan las calorías, así que a veces un solo ajuste quita dos sellos — ya está contado.
-        </Text>
+        </Txt>
 
         {sugerencias.map((s: Sugerencia) => {
           const esNutriente = s.selloId === "azucares" || s.selloId === "grasas_sat"
@@ -580,47 +631,46 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
           const categoria = (p.categoria_receta ?? "otro") as CategoriaReceta;
           const opciones = esNutriente ? sustitucionesPara(s.selloId as any, categoria) : [];
           return (
-            <View key={s.selloId} style={[est.sug, !s.viable && est.sugNoViable]}>
-              <Text style={est.sugSello}>{s.etiqueta}</Text>
-              <Text style={[est.sugAccion, !s.viable && { color: T.textoTenue }]}>{s.accion}</Text>
+            <View
+              key={s.selloId}
+              style={{
+                padding: T.esps.md, borderRadius: T.radio, marginBottom: T.esps.sm,
+                backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
+                borderStyle: s.viable ? "solid" : "dashed", opacity: s.viable ? 1 : 0.9,
+              }}
+            >
+              <Txt escala="micro" tono="tenue" fuerte mayus>{s.etiqueta}</Txt>
+              <Txt escala="cuerpo" fuerte tono={s.viable ? "principal" : "tenue"} estilo={{ marginTop: 4 }}>
+                {s.accion}
+              </Txt>
 
               {s.viable && s.actual > 0 && (
-                <View style={est.sugBarraFondo}>
-                  <View style={[est.sugBarraObjetivo, { width: `${Math.max(4, (s.objetivo / s.actual) * 100)}%` }]} />
+                <View style={{ height: 8, borderRadius: 4, backgroundColor: T.peligroSuave, marginTop: T.esps.md, overflow: "hidden" }}>
+                  <View style={{ height: 8, borderRadius: 4, backgroundColor: T.exito, width: `${Math.max(4, (s.objetivo / s.actual) * 100)}%` }} />
                 </View>
               )}
               {s.viable && s.actual > 0 && (
-                <View style={est.sugNums}>
-                  <Text style={est.sugNumTxt}>Ahora: {s.actual.toFixed(1).replace(/\.0$/, "")} {s.unidad}</Text>
-                  <Text style={[est.sugNumTxt, { color: T.exito, fontWeight: "800" }]}>
-                    Meta: {s.objetivo.toFixed(1).replace(/\.0$/, "")} {s.unidad}
-                  </Text>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", marginTop: T.esps.xs }}>
+                  <Txt escala="micro" tono="tenue">Ahora: {s.actual.toFixed(1).replace(/\.0$/, "")} {s.unidad}</Txt>
+                  <Monto texto={`Meta: ${s.objetivo.toFixed(1).replace(/\.0$/, "")} ${s.unidad}`} escala="micro" tono="exito" />
                 </View>
               )}
 
-              {s.bonus && <Text style={est.sugBonus}>↳ {s.bonus}</Text>}
-              {s.nota && <Text style={est.sugNota}>{s.nota}</Text>}
+              {s.bonus && <Txt escala="pie" tono="exito" estilo={{ marginTop: T.esps.sm }}>↳ {s.bonus}</Txt>}
+              {s.nota && <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.xs }}>{s.nota}</Txt>}
 
               {opciones.map((op, i) => (
-                <View key={i} style={[est.sust, estilosSustNivel(op.nivel, T)]}>
-                  <View style={est.sustCab}>
-                    <View style={[est.sustBadge, estilosBadgeNivel(op.nivel, T)]}>
-                      <Text style={est.sustBadgeTxt}>
-                        {op.nivel === "segura" ? "SEGURA" : op.nivel === "advertencia" ? "CON AVISO" : "NO SE ACONSEJA"}
-                      </Text>
-                    </View>
-                  </View>
-                  <Text style={est.sustTitulo}>{op.titulo}</Text>
-                  <Text style={est.sustTxt}>{op.explicacion}</Text>
-                  {op.como && <Text style={est.sustComo}>{op.como}</Text>}
-                </View>
+                <TarjetaSustitucion key={i} op={op} />
               ))}
               {esNutriente && opciones.length === 0 && (p.categoria_receta ?? "otro") === "otro" && (
-                <Pressable style={est.sustFalta} onPress={() => setVista("calc")}>
-                  <Text style={est.sustFaltaTxt}>
+                <Pressable
+                  onPress={() => setVista("calc")}
+                  style={{ marginTop: T.esps.sm, padding: T.esps.sm, borderRadius: T.radio, backgroundColor: T.acentoSuave, borderWidth: 1, borderColor: T.acento + "44" }}
+                >
+                  <Txt escala="pie" tono="acento" fuerte>
                     Dinos qué tipo de receta es (en «+ Más opciones») para darte un consejo
                     específico de sustitución →
-                  </Text>
+                  </Txt>
                 </Pressable>
               )}
             </View>
@@ -628,26 +678,26 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
         })}
 
         {sugerencias.length > 0 && (
-          <View style={[est.ok, { marginTop: 8 }]}>
-            <Text style={est.okTitulo}>
+          <View style={{ padding: T.esps.md, borderRadius: T.radio, marginTop: T.esps.xs, backgroundColor: T.exitoSuave, borderWidth: 1, borderColor: T.exito + "55" }}>
+            <Txt escala="pie" tono="exito" fuerte>
               {quedariaLimpio ? "✓ Aplicando todo, tu producto quedaría sin sellos"
                               : "Aun aplicando todo, quedaría con algún sello"}
-            </Text>
+            </Txt>
             {leyendasFijas.length > 0 && (
-              <Text style={est.okNota}>
+              <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.xs }}>
                 Las leyendas de cafeína o edulcorantes no dependen de las cantidades: para quitarlas
                 habría que sacar ese ingrediente de la receta.
-              </Text>
+              </Txt>
             )}
           </View>
         )}
 
-        <View style={est.aviso}>
-          <Text style={est.avisoTxt}>
+        <View style={{ marginTop: T.esps.lg, padding: T.esps.md, borderRadius: T.radio, backgroundColor: T.superficie2 }}>
+          <Txt escala="pie" tono="tenue">
             Bajar estos ingredientes cambia el sabor y la textura, y a veces la conservación.
             Después de ajustar tu receta, los valores hay que medirlos de nuevo — no basta con
             restar en el papel.
-          </Text>
+          </Txt>
         </View>
 
         <View style={{ height: 60 }} />
@@ -669,11 +719,11 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
       </Campo>
     );
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
-        <Text style={est.hint}>
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
+        <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.md }}>
           Todo esto es opcional — llena lo que tengas. Sirve para compartir la etiqueta completa
           con tu diseñador o tu imprenta.
-        </Text>
+        </Txt>
         {campo("denominacion", "Denominación", "Lo que ES: «Galletas de avena»")}
         {campo("marca", "Marca", "Tu marca")}
         {campo("ingredientes", "Ingredientes", "De mayor a menor cantidad", true)}
@@ -688,9 +738,13 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
         {campo("responsable_nombre", "Responsable", "Quien fabrica o comercializa")}
         {campo("responsable_domicilio", "Domicilio fiscal", "Calle, número, CP y estado", true)}
 
-        <Text style={est.lbl}>RESTO DE LA TABLA — POR 100 {u.toUpperCase()}</Text>
-        <Text style={est.hint}>No cambian los sellos, pero la tabla de tu etiqueta sí los exige.</Text>
-        <View style={est.filaCampos}>
+        <Txt escala="micro" tono="tenue" fuerte mayus estilo={{ marginTop: T.esps.md, marginBottom: T.esps.xs }}>
+          Resto de la tabla — por 100 {u.toUpperCase()}
+        </Txt>
+        <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.sm }}>
+          No cambian los sellos, pero la tabla de tu etiqueta sí los exige.
+        </Txt>
+        <View style={{ flexDirection: "row", gap: T.esps.sm }}>
           <View style={{ flex: 1 }}>
             <Campo label="Proteínas (g)">
               <TextInput style={estiloInput} value={valNum(p.proteinas_g)}
@@ -706,7 +760,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
             </Campo>
           </View>
         </View>
-        <View style={est.filaCampos}>
+        <View style={{ flexDirection: "row", gap: T.esps.sm }}>
           <View style={{ flex: 1 }}>
             <Campo label="Grasas totales (g)">
               <TextInput style={estiloInput} value={valNum(p.grasas_totales_g)}
@@ -739,23 +793,29 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     };
     const listos = Object.values(tiene).filter(Boolean).length;
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
-        <Text style={est.hint}>
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
+        <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.md }}>
           Los sellos son una parte de la etiqueta, no toda. Esto es lo demás que exige la norma.
-        </Text>
-        <View style={est.progreso}>
-          <Text style={est.progresoTxt}>{listos} de {CHECKLIST_ETIQUETA.length} completos</Text>
+        </Txt>
+        <View style={{ alignSelf: "flex-start", paddingHorizontal: T.esps.md, paddingVertical: T.esps.sm, borderRadius: T.radioChico, backgroundColor: T.acentoSuave, marginBottom: T.esps.md }}>
+          <Monto texto={`${listos} de ${CHECKLIST_ETIQUETA.length} completos`} escala="pie" tono="acento" />
         </View>
         {CHECKLIST_ETIQUETA.map((c) => (
-          <View key={c.id} style={est.chk}>
-            <View style={[est.chkMarca, tiene[c.id] && { backgroundColor: T.exito + "22", borderColor: T.exito + "66" }]}>
-              {tiene[c.id] && <Text style={{ color: T.exito, fontWeight: "800", fontSize: 12 }}>✓</Text>}
+          <View key={c.id} style={{ flexDirection: "row", gap: T.esps.md, paddingVertical: T.esps.sm, borderBottomWidth: 1, borderBottomColor: T.borde }}>
+            <View
+              style={{
+                width: 20, height: 20, borderRadius: T.radioChico, borderWidth: 1, alignItems: "center", justifyContent: "center",
+                borderColor: tiene[c.id] ? T.exito + "66" : T.borde,
+                backgroundColor: tiene[c.id] ? T.exitoSuave : T.superficie2,
+              }}
+            >
+              {tiene[c.id] && <Txt escala="micro" tono="exito" fuerte>✓</Txt>}
             </View>
             <View style={{ flex: 1 }}>
-              <Text style={[est.chkN, tiene[c.id] && { color: T.textoTenue }]}>
-                {c.n} <Text style={est.chkRef}>{c.ref}</Text>
-              </Text>
-              <Text style={est.chkAyuda}>{c.ayuda}</Text>
+              <Txt escala="pie" tono={tiene[c.id] ? "tenue" : "principal"} fuerte={!tiene[c.id]}>
+                {c.n} <Txt escala="micro" tono="tenue">{c.ref}</Txt>
+              </Txt>
+              <Txt escala="micro" tono="tenue" estilo={{ marginTop: 2 }}>{c.ayuda}</Txt>
             </View>
           </View>
         ))}
@@ -768,28 +828,28 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   function VistaTramites() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
-        <View style={est.aclara}>
-          <Text style={est.aclaraTxt}>
-            <Text style={{ fontWeight: "800" }}>No existe un trámite para que te «aprueben» el sello.</Text>{" "}
-            La norma lo dice textualmente: su evaluación «no es certificable y se puede llevar a cabo
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
+        <View style={{ padding: T.esps.md, borderRadius: T.radio, marginBottom: T.esps.lg, backgroundColor: T.acentoSuave, borderWidth: 1, borderColor: T.acento + "55" }}>
+          <Txt escala="pie">
+            <Txt escala="pie" fuerte>No existe un trámite para que te «aprueben» el sello.</Txt> La
+            norma lo dice textualmente: su evaluación «no es certificable y se puede llevar a cabo
             a través de un esquema voluntario» (numeral 9). Tú etiquetas bajo tu responsabilidad y la
             autoridad verifica después.
-          </Text>
+          </Txt>
         </View>
         {TRAMITES.map((t) => (
-          <View key={t.id} style={est.tramite}>
-            <Text style={est.tramiteN}>{t.n}</Text>
-            <Text style={est.tramiteQuien}>{t.quien}</Text>
-            <Text style={est.tramiteDet}>{t.detalle}</Text>
+          <View key={t.id} style={{ paddingVertical: T.esps.md, borderBottomWidth: 1, borderBottomColor: T.borde }}>
+            <Txt escala="cuerpo" fuerte>{t.n}</Txt>
+            <Txt escala="micro" tono="tenue" estilo={{ marginTop: 2, marginBottom: T.esps.xs }}>{t.quien}</Txt>
+            <Txt escala="pie" tono="tenue">{t.detalle}</Txt>
           </View>
         ))}
-        <View style={est.fuente}>
-          <Text style={est.fuenteTxt}>
+        <View style={{ marginTop: T.esps.lg, padding: T.esps.md, borderRadius: T.radioChico, backgroundColor: T.superficie2 }}>
+          <Txt escala="micro" tono="tenue">
             Verificado el {FECHA_VERIFICACION} contra el texto íntegro de la NOM-051
             (DOF 27/03/2020) y el Acuerdo de fases (DOF 31/07/2025). Las fechas se han recorrido
             dos veces: si lees esto después de 2027, confirma en el Diario Oficial.
-          </Text>
+          </Txt>
         </View>
         <View style={{ height: 40 }} />
       </ScrollView>
@@ -811,7 +871,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <CabeceraModal titulo={cab.t} izquierda={cab.i} onIzquierda={cab.f} />
 
@@ -824,257 +884,202 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
           {/* Barra de acciones: solo en las vistas de trabajo */}
           {(vista === "calc" || vista === "etiqueta" || vista === "checklist") && (
-            <View style={est.barra}>
+            <View style={{ flexDirection: "row", gap: T.esps.sm, padding: T.esp, borderTopWidth: 1, borderTopColor: T.borde, backgroundColor: T.superficie }}>
               {vista === "calc" ? (
                 <>
-                  <Pressable style={est.accSec} onPress={() => setVista("etiqueta")}>
-                    <Text style={est.accSecTxt}>Etiqueta</Text>
-                  </Pressable>
-                  <Pressable style={est.accSec} onPress={() => setVista("checklist")}>
-                    <Text style={est.accSecTxt}>Checklist</Text>
-                  </Pressable>
+                  <BotonSecundarioChico label="Etiqueta" onPress={() => setVista("etiqueta")} />
+                  <BotonSecundarioChico label="Checklist" onPress={() => setVista("checklist")} />
                 </>
               ) : (
-                <Pressable style={est.accSec} onPress={() => setVista("calc")}>
-                  <Text style={est.accSecTxt}>Sellos</Text>
-                </Pressable>
+                <BotonSecundarioChico label="Sellos" onPress={() => setVista("calc")} />
               )}
-              {p.id ? (
-                <Pressable style={est.accSec} onPress={compartir}>
-                  <Text style={est.accSecTxt}>Compartir</Text>
-                </Pressable>
-              ) : null}
-              <Pressable style={[est.accPri, guardando && { opacity: 0.6 }]} onPress={guardar} disabled={guardando}>
-                <Text style={est.accPriTxt}>{guardando ? "Guardando…" : "Guardar"}</Text>
+              {p.id ? <BotonSecundarioChico label="Compartir" onPress={compartir} /> : null}
+              <Pressable
+                onPress={guardar}
+                disabled={guardando}
+                style={{ flex: 1, paddingVertical: T.esps.md, borderRadius: T.radio, backgroundColor: T.acentoRelleno, alignItems: "center", justifyContent: "center", opacity: guardando ? 0.6 : 1 }}
+              >
+                <Txt escala="pie" fuerte estilo={{ color: T.acentoTexto }}>{guardando ? "Guardando…" : "Guardar"}</Txt>
               </Pressable>
             </View>
           )}
 
           {vista === "calc" && p.id ? (
-            <Pressable style={est.borrar} onPress={borrar}>
-              <Text style={est.borrarTxt}>Eliminar esta etiqueta</Text>
+            <Pressable
+              onPress={() => setConfirmandoBorrado(true)}
+              style={{ paddingVertical: T.esps.md, alignItems: "center", backgroundColor: T.superficie }}
+            >
+              <Txt escala="pie" tono="peligro">Eliminar esta etiqueta</Txt>
             </Pressable>
           ) : null}
         </KeyboardAvoidingView>
       </SafeAreaView>
+
+      {/* Confirmación de borrado: antes NO existía — un toque y desaparecía. */}
+      <Hoja
+        visible={confirmandoBorrado}
+        onCerrar={() => setConfirmandoBorrado(false)}
+        titulo="Eliminar etiqueta"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Eliminar" tipo="peligro" onPress={confirmarBorrado} />
+            <Boton titulo="Cancelar" tipo="secundario" onPress={() => setConfirmandoBorrado(false)} />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {p.nombre ? `¿Eliminar "${p.nombre}"? No se puede deshacer.` : "¿Eliminar esta etiqueta? No se puede deshacer."}
+        </Txt>
+      </Hoja>
     </Modal>
   );
 }
 
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp },
+// ---------------------------------------------------------------------------
+// Piezas locales
+// ---------------------------------------------------------------------------
 
-    vigencia: {
-      flexDirection: "row", alignItems: "center", gap: 8,
-      padding: 10, borderRadius: T.radio,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-    },
-    vigPunto: { width: 7, height: 7, borderRadius: 4, backgroundColor: T.exito },
-    vigTxt: { flex: 1, color: T.textoTenue, fontSize: 12, lineHeight: 17 },
-    vigFecha: { color: T.textoTenue, fontSize: 10.5, marginTop: 5, textAlign: "center" },
-
-    arranque: { paddingVertical: 20, alignItems: "center" },
-    arranqueH: { color: T.texto, fontSize: 18, fontWeight: "800", textAlign: "center", marginBottom: 10 },
-    arranqueP: { color: T.textoTenue, fontSize: 13.5, lineHeight: 20, textAlign: "center", marginBottom: 8 },
-    arranqueNota: { color: T.textoTenue, fontSize: 12, textAlign: "center", opacity: 0.8 },
-
-    fila: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 13, marginBottom: 8,
-    },
-    filaCont: {
-      width: 34, height: 34, borderRadius: 10,
-      backgroundColor: T.peligro + "22",
-      alignItems: "center", justifyContent: "center",
-    },
-    filaContTxt: { color: T.peligro, fontWeight: "800", fontSize: 15 },
-    filaNombre: { color: T.texto, fontSize: 15, fontWeight: "700" },
-    filaMeta: { color: T.textoTenue, fontSize: 12, marginTop: 1 },
-    flecha: { color: T.textoTenue, fontSize: 16 },
-
-    segmento: {
-      flexDirection: "row", gap: 4, padding: 4, marginBottom: 6,
-      backgroundColor: T.superficie2 ?? T.superficie3, borderRadius: T.radio,
-    },
-    segBtn: { flex: 1, paddingVertical: 9, borderRadius: 8, alignItems: "center" },
-    segTxt: { color: T.textoTenue, fontSize: 13, fontWeight: "700" },
-
-    lbl: {
-      color: T.textoTenue, fontSize: 10.5, fontWeight: "800",
-      letterSpacing: 0.6, marginTop: 18, marginBottom: 6,
-    },
-    hint: { color: T.textoTenue, fontSize: 12, lineHeight: 17, marginBottom: 10 },
-    filaCampos: { flexDirection: "row", gap: 10 },
-
-    check: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 7 },
-    checkCaja: {
-      width: 22, height: 22, borderRadius: 6, borderWidth: 1, borderColor: T.borde,
-      alignItems: "center", justifyContent: "center",
-    },
-    checkMarca: { color: "#fff", fontSize: 13, fontWeight: "800" },
-    checkTxt: { flex: 1, color: T.texto, fontSize: 14 },
-
-    radio: { flexDirection: "row", alignItems: "center", gap: 10, paddingVertical: 7 },
-    radioCaja: {
-      width: 20, height: 20, borderRadius: 10, borderWidth: 1.5, borderColor: T.borde,
-      alignItems: "center", justifyContent: "center",
-    },
-    radioPunto: { width: 10, height: 10, borderRadius: 5 },
-    radioEjemplo: { color: T.textoTenue, fontSize: 11, marginTop: 1 },
-
-    masBtn: { paddingVertical: 14, alignItems: "center" },
-    masTxt: { color: T.acento, fontSize: 13.5, fontWeight: "700" },
-    avanzado: {
-      padding: 14, borderRadius: T.radio,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-    },
-
-    ok: {
-      padding: 14, borderRadius: T.radio, marginTop: 16,
-      backgroundColor: T.exito + "14", borderWidth: 1, borderColor: T.exito + "55",
-    },
-    okTitulo: { color: T.exito, fontSize: 14.5, fontWeight: "800" },
-    okNota: { color: T.textoTenue, fontSize: 12.5, lineHeight: 18, marginTop: 6 },
-
-    resultado: { marginTop: 18 },
-    resTitulo: { color: T.texto, fontSize: 15, fontWeight: "800", marginBottom: 12 },
-    sellosFila: { flexDirection: "row", flexWrap: "wrap", gap: 12 },
-    selloCaja: { alignItems: "center", width: 100 },
-    selloRazon: { color: T.textoTenue, fontSize: 10, textAlign: "center", marginTop: 5, lineHeight: 14 },
-    selloRazonIzq: { color: T.textoTenue, fontSize: 11, marginTop: 4, lineHeight: 15 },
-    razonFila: { color: T.textoTenue, fontSize: 12, lineHeight: 17 },
-
-    numAviso: {
-      padding: 11, borderRadius: T.radio, marginBottom: 12,
-      backgroundColor: T.acento + "14", borderWidth: 1, borderColor: T.acento + "55",
-    },
-    numAvisoTxt: { color: T.texto, fontSize: 12.5, lineHeight: 18 },
-
-    impresion: {
-      marginTop: 16, padding: 13, borderRadius: T.radio,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-    },
-    impTitulo: { color: T.textoTenue, fontSize: 10, fontWeight: "800", letterSpacing: 0.6, marginBottom: 7 },
-    impFila: { color: T.textoTenue, fontSize: 12.5, lineHeight: 18, marginBottom: 3 },
-
-    futuro: {
-      marginTop: 14, padding: 12, borderRadius: T.radio,
-      backgroundColor: (T.alerta ?? "#f59e0b") + "14",
-      borderWidth: 1, borderColor: (T.alerta ?? "#f59e0b") + "55",
-    },
-    futuroTxt: { color: T.texto, fontSize: 12.5, lineHeight: 18 },
-
-    sug: {
-      padding: 14, borderRadius: T.radio, marginBottom: 10,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-    },
-    sugNoViable: { borderStyle: "dashed", opacity: 0.9 },
-    sugSello: { color: T.textoTenue, fontSize: 10.5, fontWeight: "800", letterSpacing: 0.5 },
-    sugAccion: { color: T.texto, fontSize: 14.5, fontWeight: "700", marginTop: 4, lineHeight: 20 },
-    sugBarraFondo: {
-      height: 8, borderRadius: 4, backgroundColor: T.peligro + "33",
-      marginTop: 12, overflow: "hidden",
-    },
-    sugBarraObjetivo: { height: 8, borderRadius: 4, backgroundColor: T.exito },
-    sugNums: { flexDirection: "row", justifyContent: "space-between", marginTop: 5 },
-    sugNumTxt: { color: T.textoTenue, fontSize: 11.5 },
-    sugBonus: { color: T.exito, fontSize: 12, lineHeight: 17, marginTop: 9 },
-    sugNota: { color: T.textoTenue, fontSize: 11.5, lineHeight: 16, marginTop: 7 },
-
-    aviso: {
-      marginTop: 14, padding: 12, borderRadius: T.radio,
-      backgroundColor: T.superficie2 ?? T.superficie3,
-    },
-    avisoTxt: { color: T.textoTenue, fontSize: 12, lineHeight: 17 },
-
-    progreso: {
-      alignSelf: "flex-start", paddingHorizontal: 12, paddingVertical: 7,
-      borderRadius: 8, backgroundColor: T.acento + "1f", marginBottom: 12,
-    },
-    progresoTxt: { color: T.acento, fontSize: 12.5, fontWeight: "700" },
-    chk: {
-      flexDirection: "row", gap: 11, paddingVertical: 10,
-      borderBottomWidth: 1, borderBottomColor: T.borde,
-    },
-    chkMarca: {
-      width: 20, height: 20, borderRadius: 6, borderWidth: 1, borderColor: T.borde,
-      backgroundColor: T.superficie2 ?? T.superficie3,
-      alignItems: "center", justifyContent: "center",
-    },
-    chkN: { color: T.texto, fontSize: 13.5, fontWeight: "600" },
-    chkRef: { color: T.textoTenue, fontSize: 10.5, fontWeight: "400" },
-    chkAyuda: { color: T.textoTenue, fontSize: 11.5, lineHeight: 16, marginTop: 2 },
-
-    aclara: {
-      padding: 14, borderRadius: T.radio, marginBottom: 16,
-      backgroundColor: T.acento + "14", borderWidth: 1, borderColor: T.acento + "55",
-    },
-    aclaraTxt: { color: T.texto, fontSize: 13, lineHeight: 19 },
-    tramite: { paddingVertical: 13, borderBottomWidth: 1, borderBottomColor: T.borde },
-    tramiteN: { color: T.texto, fontSize: 14.5, fontWeight: "700" },
-    tramiteQuien: { color: T.textoTenue, fontSize: 11.5, marginTop: 2, marginBottom: 5 },
-    tramiteDet: { color: T.textoTenue, fontSize: 12.5, lineHeight: 18 },
-    fuente: {
-      marginTop: 16, padding: 12, borderRadius: 8,
-      backgroundColor: T.superficie2 ?? T.superficie3,
-    },
-    fuenteTxt: { color: T.textoTenue, fontSize: 11, lineHeight: 16 },
-
-    barra: {
-      flexDirection: "row", gap: 8, padding: T.esp,
-      borderTopWidth: 1, borderTopColor: T.borde, backgroundColor: T.superficie,
-    },
-    accSec: {
-      paddingHorizontal: 13, paddingVertical: 12, borderRadius: T.radio,
-      borderWidth: 1, borderColor: T.borde, justifyContent: "center",
-    },
-    accSecTxt: { color: T.textoTenue, fontSize: 13, fontWeight: "700" },
-    accPri: {
-      flex: 1, paddingVertical: 12, borderRadius: T.radio,
-      backgroundColor: T.acento, alignItems: "center", justifyContent: "center",
-    },
-    accPriTxt: { color: T.acentoTexto ?? "#fff", fontSize: 14.5, fontWeight: "800" },
-
-    borrar: { paddingVertical: 12, alignItems: "center", backgroundColor: T.superficie },
-    borrarTxt: { color: T.peligro, fontSize: 13, fontWeight: "600" },
-
-    // Tarjeta de sustitución dentro de "Mejorar" — el color según nivel
-    // (segura/advertencia/no_recomendada) se aplica aparte, con
-    // estilosSustNivel/estilosBadgeNivel, porque depende de un valor en
-    // tiempo de ejecución y StyleSheet.create no admite eso.
-    sust: {
-      marginTop: 12, padding: 12, borderRadius: T.radio, borderWidth: 1,
-    },
-    sustCab: { flexDirection: "row", marginBottom: 7 },
-    sustBadge: { paddingHorizontal: 9, paddingVertical: 3, borderRadius: 999 },
-    sustBadgeTxt: { fontSize: 9.5, fontWeight: "800", letterSpacing: 0.4, color: "#fff" },
-    sustTitulo: { color: T.texto, fontSize: 13.5, fontWeight: "700", marginBottom: 4 },
-    sustTxt: { color: T.textoTenue, fontSize: 12, lineHeight: 17 },
-    sustComo: { color: T.textoTenue, fontSize: 11.5, lineHeight: 16, marginTop: 7, fontStyle: "italic" },
-    sustFalta: {
-      marginTop: 10, padding: 10, borderRadius: T.radio,
-      backgroundColor: T.acento + "14", borderWidth: 1, borderColor: T.acento + "44",
-    },
-    sustFaltaTxt: { color: T.acento, fontSize: 12, fontWeight: "600", lineHeight: 17 },
-  });
+function Segmentado({
+  opciones,
+  valor,
+  onCambio,
+}: {
+  opciones: { id: string; label: string }[];
+  valor: string;
+  onCambio: (v: string) => void;
+}) {
+  const { tema: T } = useTema();
+  return (
+    <View style={{ flexDirection: "row", backgroundColor: T.superficie2, borderRadius: T.radio, padding: 3 }}>
+      {opciones.map((o) => {
+        const activo = valor === o.id;
+        return (
+          <Pressable
+            key={o.id}
+            onPress={() => onCambio(o.id)}
+            style={{ flex: 1, minHeight: 40, alignItems: "center", justifyContent: "center", borderRadius: T.radioChico, backgroundColor: activo ? T.acentoRelleno : "transparent" }}
+          >
+            <Txt escala="pie" fuerte={activo} tono="suave" estilo={activo ? { color: T.acentoTexto } : undefined}>
+              {o.label}
+            </Txt>
+          </Pressable>
+        );
+      })}
+    </View>
+  );
 }
 
-/**
- * Color de la tarjeta según el nivel de la sustitución. Función aparte del
- * StyleSheet a propósito: el nivel se sabe hasta que se calcula la
- * sugerencia, no se puede fijar de antemano como el resto de los estilos.
- */
-function estilosSustNivel(nivel: NivelSustitucion, T: Tema) {
-  if (nivel === "segura") return { backgroundColor: T.exito + "12", borderColor: T.exito + "55" };
-  if (nivel === "no_recomendada") return { backgroundColor: T.peligro + "12", borderColor: T.peligro + "55" };
-  return { backgroundColor: (T.alerta ?? "#f59e0b") + "12", borderColor: (T.alerta ?? "#f59e0b") + "55" };
+// Antes: fondo T.acento crudo + marca blanca fija — el mismo bug de
+// contraste con acentos claros ("Perla") que ya se corrigió en el resto de
+// la app. Ahora T.acentoRelleno + T.acentoTexto, que se resuelven según la
+// luminosidad del acento activo.
+function CheckFila({ label, valor, onCambio }: { label: string; valor: boolean; onCambio: () => void }) {
+  const { tema: T } = useTema();
+  return (
+    <Pressable onPress={onCambio} style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, paddingVertical: T.esps.xs }}>
+      <View
+        style={{
+          width: 22, height: 22, borderRadius: 6, borderWidth: 1, alignItems: "center", justifyContent: "center",
+          borderColor: valor ? T.acentoRelleno : T.borde,
+          backgroundColor: valor ? T.acentoRelleno : "transparent",
+        }}
+      >
+        {valor && <Txt escala="micro" fuerte estilo={{ color: T.acentoTexto }}>✓</Txt>}
+      </View>
+      <Txt escala="pie" estilo={{ flex: 1 }}>{label}</Txt>
+    </Pressable>
+  );
 }
 
-function estilosBadgeNivel(nivel: NivelSustitucion, T: Tema) {
-  if (nivel === "segura") return { backgroundColor: T.exito };
-  if (nivel === "no_recomendada") return { backgroundColor: T.peligro };
-  return { backgroundColor: T.alerta ?? "#f59e0b" };
+function RadioFila({
+  label,
+  ejemplo,
+  activo,
+  onPress,
+}: {
+  label: string;
+  ejemplo?: string;
+  activo: boolean;
+  onPress: () => void;
+}) {
+  const { tema: T } = useTema();
+  return (
+    <Pressable onPress={onPress} style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, paddingVertical: T.esps.xs }}>
+      <View
+        style={{
+          width: 20, height: 20, borderRadius: 10, borderWidth: 1.5, alignItems: "center", justifyContent: "center",
+          borderColor: activo ? T.acentoRelleno : T.borde,
+        }}
+      >
+        {activo && <View style={{ width: 10, height: 10, borderRadius: 5, backgroundColor: T.acentoRelleno }} />}
+      </View>
+      <View style={{ flex: 1 }}>
+        <Txt escala="pie">{label}</Txt>
+        {ejemplo ? <Txt escala="micro" tono="tenue" estilo={{ marginTop: 1 }}>{ejemplo}</Txt> : null}
+      </View>
+    </Pressable>
+  );
+}
+
+function BotonSecundarioChico({ label, onPress }: { label: string; onPress: () => void }) {
+  const { tema: T } = useTema();
+  return (
+    <Pressable
+      onPress={onPress}
+      style={{ paddingHorizontal: T.esps.md, paddingVertical: T.esps.md, borderRadius: T.radio, borderWidth: 1, borderColor: T.borde, justifyContent: "center" }}
+    >
+      <Txt escala="pie" tono="suave" fuerte>{label}</Txt>
+    </Pressable>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Insignia de sustitución — el contraste se calculó, no se asumió
+// ---------------------------------------------------------------------------
+//
+// El texto blanco fijo sobre el fondo de nivel fallaba de verdad en tema
+// oscuro: 2.17:1 sobre "alerta", 2.78:1 sobre "peligro" (el mínimo es
+// 4.5:1). Se resuelve con texto oscuro para esos dos en modo oscuro (ambos
+// pasan con holgura verificada), y una variante de jade un poco más
+// profunda SOLO para este relleno — el T.exito normal no basta ni con
+// blanco (3.80) ni con tinta oscura (4.42) encima.
+const JADE_INSIGNIA_OSCURO = "#477164"; // contraste 5.51 con blanco, verificado
+const TINTA_OSCURA = "#1c1d24";
+
+function coloresNivel(nivel: NivelSustitucion, T: Tema) {
+  if (nivel === "segura") {
+    return T.esClaro
+      ? { fondo: T.exito, borde: T.exito + "55", texto: "#ffffff" }
+      : { fondo: JADE_INSIGNIA_OSCURO, borde: T.exito + "55", texto: "#ffffff" };
+  }
+  if (nivel === "no_recomendada") {
+    return T.esClaro
+      ? { fondo: T.peligro, borde: T.peligro + "55", texto: "#ffffff" }
+      : { fondo: T.peligro, borde: T.peligro + "55", texto: TINTA_OSCURA };
+  }
+  // advertencia
+  return T.esClaro
+    ? { fondo: T.alerta, borde: T.alerta + "55", texto: "#ffffff" }
+    : { fondo: T.alerta, borde: T.alerta + "55", texto: TINTA_OSCURA };
+}
+
+function TarjetaSustitucion({ op }: { op: { nivel: NivelSustitucion; titulo: string; explicacion: string; como?: string } }) {
+  const { tema: T } = useTema();
+  const col = coloresNivel(op.nivel, T);
+  return (
+    <View style={{ marginTop: T.esps.md, padding: T.esps.md, borderRadius: T.radio, borderWidth: 1, backgroundColor: col.fondo + "12", borderColor: col.borde }}>
+      <View style={{ flexDirection: "row", marginBottom: T.esps.xs }}>
+        <View style={{ paddingHorizontal: T.esps.sm, paddingVertical: 3, borderRadius: T.radioPildora, backgroundColor: col.fondo }}>
+          <Text style={{ fontSize: 9.5, fontWeight: "800", letterSpacing: 0.4, color: col.texto }}>
+            {op.nivel === "segura" ? "SEGURA" : op.nivel === "advertencia" ? "CON AVISO" : "NO SE ACONSEJA"}
+          </Text>
+        </View>
+      </View>
+      <Txt escala="pie" fuerte estilo={{ marginBottom: T.esps.xs }}>{op.titulo}</Txt>
+      <Txt escala="micro" tono="tenue">{op.explicacion}</Txt>
+      {op.como && (
+        <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.sm, fontStyle: "italic" }}>{op.como}</Txt>
+      )}
+    </View>
+  );
 }

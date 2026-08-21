@@ -2,32 +2,36 @@
 //
 // Lista + constructor (productos del catálogo o conceptos libres, cada uno
 // con cantidad y precio editables) + detalle con "Compartir" (texto listo
-// para WhatsApp) y "Convertir a venta". Mismo espíritu de UI que
-// ModalProveedores.tsx: una sola pantalla, `vista` decide qué se ve.
+// para WhatsApp) y "Convertir a venta".
 //
 // ⚠️ "Convertir a venta" aquí PREPARA los datos (prepararParaVenta +
 // dejarCotizacionParaVenta) y navega a la pantalla de venta — pero el
 // enganche final (que la pantalla de venta LEA esos datos al montar y
-// cargue el carrito) depende de cómo esté armada esa pantalla, que no vi
-// en esta sesión. Búscalo marcado con "🔌" más abajo.
+// cargue el carrito) depende de cómo esté armada esa pantalla. Confirmado
+// en la migración a Vender: sí lo hace (tomarCotizacionPendiente() en
+// vender.tsx), así que el flujo está completo.
+//
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// 1. "Eliminar" NO TENÍA NINGUNA CONFIRMACIÓN — ni siquiera un Alert nativo.
+//    Tocabas el botón y la cotización desaparecía sin poder arrepentirte.
+//    Es el único de los modales de "herramientas" con ese hueco: se agregó
+//    una <Hoja> de confirmación, igual que en ModalDepartamentos,
+//    FormularioProducto y ModalLealtad — no por copiar el patrón, sino
+//    porque faltaba de verdad.
+// 2. BackHandler para el drill-down (lista -> form / detalle): sin él, el
+//    botón Atrás de Android cerraba todo el modal en vez de retroceder un
+//    nivel. Mismo arreglo que en Vender y ModalLealtad.
+// 3. Las listas (cotizaciones, resultados del buscador) pasan a <Fila> con
+//    <Monto> para los totales — antes un estilo de fila propio.
+// 4. No había T.turquesa en este archivo — ya usaba T.texto correctamente.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  Pressable,
-  StyleSheet,
-  Modal,
-  ScrollView,
-  KeyboardAvoidingView,
-  Platform,
-  ActivityIndicator,
-  Share,
-} from "react-native";
+import { View, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Share, BackHandler } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, Campo, useEstiloInput } from "@/src/componentes/ui";
+import { Boton, Banner, CabeceraModal, Campo, Hoja, Grupo, Fila, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
 import { IconoUI } from "@/src/componentes/iconos";
 import { pesos } from "@/src/base/formato";
 import { leerNombreNegocio } from "@/src/base/giro";
@@ -44,14 +48,9 @@ import {
   prepararParaVenta,
   textoCotizacion,
 } from "@/src/base/cotizaciones";
-// El módulo real de catálogo es src/base/inventario (confirmado viendo
-// vender.tsx). `listarProductos({})` trae todo; filtramos en JS igual que
-// hace la propia pantalla de venta con su búsqueda (mismo patrón, cero
-// riesgo de adivinar mal la forma exacta de un filtro server-side).
 import { listarProductos, type ProductoLista } from "@/src/base/inventario";
 import { dejarCotizacionParaVenta } from "@/src/base/handoff";
 
-type Tema = ReturnType<typeof useTema>["tema"];
 type Vista = "lista" | "form" | "detalle";
 type ItemLinea = DatosLinea & { id: string }; // id local, solo para las keys de React
 
@@ -76,7 +75,6 @@ export default function ModalCotizaciones({
   onIrAVenta: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
 
   const [vista, setVista] = useState<Vista>("lista");
@@ -86,6 +84,7 @@ export default function ModalCotizaciones({
   const [detalle, setDetalle] = useState<CotizacionConLineas | null>(null);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
+  const [confirmandoBorrado, setConfirmandoBorrado] = useState(false);
 
   // --- Formulario (constructor) ---
   const [clienteNombre, setClienteNombre] = useState("");
@@ -111,6 +110,23 @@ export default function ModalCotizaciones({
   useEffect(() => {
     void cargar();
   }, [cargar]);
+
+  // Atrás del sistema: retrocede un nivel en vez de cerrar todo el modal.
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (buscadorAbierto) {
+        setBuscadorAbierto(false);
+        return true;
+      }
+      if (vista === "form" || vista === "detalle") {
+        setVista("lista");
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+  }, [vista, buscadorAbierto]);
 
   useEffect(() => {
     if (!buscadorAbierto) return;
@@ -242,10 +258,11 @@ export default function ModalCotizaciones({
     }
   }
 
-  async function eliminar() {
+  async function confirmarEliminar() {
     if (!detalle) return;
     await eliminarCotizacion(detalle.id);
     await cargar();
+    setConfirmandoBorrado(false);
     setVista("lista");
   }
 
@@ -255,54 +272,47 @@ export default function ModalCotizaciones({
 
   function VistaLista() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
         <TextInput
-          style={[estiloInput, { marginBottom: 12 }]}
+          style={[estiloInput, { marginBottom: T.esps.md }]}
           value={busqueda}
           onChangeText={setBusqueda}
           placeholder="Buscar por folio o cliente…"
           placeholderTextColor={T.textoTenue}
         />
-        <View style={{ marginBottom: 18 }}>
+        <View style={{ marginBottom: T.esps.lg }}>
           <Boton titulo="+ Nueva cotización" onPress={nuevaCotizacion} />
         </View>
         {cargando ? (
-          <ActivityIndicator color={T.acento} style={{ marginTop: 30 }} />
+          <ActivityIndicator color={T.acento} style={{ marginTop: T.esps.xl }} />
         ) : cotizaciones.length === 0 ? (
-          <Text style={est.vacio}>
-            {busqueda ? "Sin resultados con esa búsqueda." : "Aún no tienes cotizaciones.\n\nToca «+ Nueva cotización» para armar la primera."}
-          </Text>
+          <Vacio
+            titulo={busqueda ? "Sin resultados" : "Aún no tienes cotizaciones"}
+            texto={busqueda ? "Prueba con otro folio o nombre." : "Toca «+ Nueva cotización» para armar la primera."}
+          />
         ) : (
-          cotizaciones.map((c) => (
-            <Pressable
-              key={c.id}
-              style={({ pressed }) => [est.fila, pressed && { backgroundColor: T.superficie3 }]}
-              onPress={() => abrirDetalle(c)}
-            >
-              <View style={est.filaIcono}>
-                <IconoUI id="cotizacion" size={19} color={T.acento} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={est.filaNombre} numberOfLines={1}>
-                  #{c.folio}{c.cliente_nombre ? ` · ${c.cliente_nombre}` : ""}
-                </Text>
-                <Text style={est.filaMeta}>
-                  {ETIQUETA[c.estado]}{c.valida_hasta ? ` · vence ${c.valida_hasta}` : ""}
-                </Text>
-              </View>
-              <Text style={est.filaTotal}>{pesos(c.total_centavos)}</Text>
-            </Pressable>
-          ))
+          <Grupo>
+            {cotizaciones.map((c) => (
+              <Fila
+                key={c.id}
+                titulo={`#${c.folio}${c.cliente_nombre ? ` · ${c.cliente_nombre}` : ""}`}
+                meta={`${ETIQUETA[c.estado]}${c.valida_hasta ? ` · vence ${c.valida_hasta}` : ""}`}
+                icono={<IconoUI id="cotizacion" size={19} color={T.acento} />}
+                onPress={() => abrirDetalle(c)}
+                valor={<Monto texto={pesos(c.total_centavos)} escala="pie" />}
+              />
+            ))}
+          </Grupo>
         )}
-        <View style={{ height: 30 }} />
+        <View style={{ height: T.esps.xl }} />
       </ScrollView>
     );
   }
 
   function VistaForm() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
         <Campo label="Cliente (opcional)">
           <TextInput style={estiloInput} value={clienteNombre} onChangeText={setClienteNombre}
@@ -317,17 +327,29 @@ export default function ModalCotizaciones({
             placeholder="AAAA-MM-DD" placeholderTextColor={T.textoTenue} keyboardType="numbers-and-punctuation" />
         </Campo>
 
-        <Text style={est.subLbl}>CONCEPTOS</Text>
+        <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginTop: T.esps.xs, marginBottom: T.esps.sm }}>
+          Conceptos
+        </Txt>
         {lineas.map((l) => (
-          <View key={l.id} style={est.lineaCaja}>
+          <View
+            key={l.id}
+            style={{
+              backgroundColor: T.superficie,
+              borderWidth: 1,
+              borderColor: T.borde,
+              borderRadius: T.radio,
+              padding: T.esps.sm,
+              marginBottom: T.esps.sm,
+            }}
+          >
             <TextInput
-              style={[estiloInput, { marginBottom: 6 }]}
+              style={[estiloInput, { marginBottom: T.esps.xs }]}
               value={l.descripcion}
               onChangeText={(v) => actualizarLinea(l.id, { descripcion: v })}
               placeholder="Descripción"
               placeholderTextColor={T.textoTenue}
             />
-            <View style={{ flexDirection: "row", gap: 8 }}>
+            <View style={{ flexDirection: "row", gap: T.esps.sm }}>
               <TextInput
                 style={[estiloInput, { flex: 1 }]}
                 value={String(l.cantidad)}
@@ -344,13 +366,18 @@ export default function ModalCotizaciones({
                 keyboardType="decimal-pad"
                 placeholderTextColor={T.textoTenue}
               />
-              <Pressable style={est.quitarBtn} onPress={() => quitarLinea(l.id)}>
-                <Text style={est.quitarTxt}>×</Text>
+              <Pressable
+                onPress={() => quitarLinea(l.id)}
+                style={{ width: 44, alignItems: "center", justifyContent: "center" }}
+              >
+                <Txt escala="titulo" tono="tenue">
+                  ×
+                </Txt>
               </Pressable>
             </View>
           </View>
         ))}
-        <View style={{ flexDirection: "row", gap: 10, marginBottom: 16 }}>
+        <View style={{ flexDirection: "row", gap: T.esps.sm, marginBottom: T.esps.lg }}>
           <View style={{ flex: 1 }}>
             <Boton titulo="+ Del catálogo" tipo="secundario" chico onPress={() => setBuscadorAbierto(true)} />
           </View>
@@ -371,9 +398,14 @@ export default function ModalCotizaciones({
           />
         </Campo>
 
-        <Text style={est.totalTxt}>Total: {pesos(totalFinal)}</Text>
+        <View style={{ alignItems: "flex-end", marginBottom: T.esps.md }}>
+          <Txt escala="pie" tono="suave">
+            Total
+          </Txt>
+          <Monto texto={pesos(totalFinal)} escala="titulo" />
+        </View>
         <Boton titulo="Crear cotización" onPress={guardar} cargando={guardando} />
-        <View style={{ height: 40 }} />
+        <View style={{ height: T.esps.xxl }} />
       </ScrollView>
     );
   }
@@ -381,26 +413,56 @@ export default function ModalCotizaciones({
   function VistaDetalle() {
     if (!detalle) return null;
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
         <Banner texto={error} tipo="error" />
-        <Text style={est.detEstado}>{ETIQUETA[detalle.estado]}{detalle.valida_hasta ? ` · válida hasta ${detalle.valida_hasta}` : ""}</Text>
+        <Txt escala="pie" tono="tenue" fuerte estilo={{ marginBottom: T.esps.md }}>
+          {ETIQUETA[detalle.estado]}{detalle.valida_hasta ? ` · válida hasta ${detalle.valida_hasta}` : ""}
+        </Txt>
         {detalle.lineas.map((l) => (
-          <View key={l.id} style={est.detLinea}>
-            <Text style={est.detLineaTxt} numberOfLines={2}>
+          <View
+            key={l.id}
+            style={{ flexDirection: "row", justifyContent: "space-between", gap: T.esps.sm, paddingVertical: T.esps.xs }}
+          >
+            <Txt escala="pie" estilo={{ flex: 1 }} lineas={2}>
               {l.cantidad % 1 === 0 ? l.cantidad : l.cantidad.toFixed(3)} × {l.descripcion}
-            </Text>
-            <Text style={est.detLineaTotal}>{pesos(l.total_linea_centavos)}</Text>
+            </Txt>
+            <Monto texto={pesos(l.total_linea_centavos)} escala="pie" fuerte />
           </View>
         ))}
-        <View style={est.detTotales}>
-          <View style={est.detTotalFila}><Text style={est.detTotalLbl}>Subtotal</Text><Text style={est.detTotalVal}>{pesos(detalle.subtotal_centavos)}</Text></View>
+        <View
+          style={{
+            borderTopWidth: 1,
+            borderTopColor: T.borde,
+            marginTop: T.esps.sm,
+            paddingTop: T.esps.sm,
+          }}
+        >
+          <View style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 }}>
+            <Txt escala="pie" tono="tenue">Subtotal</Txt>
+            <Monto texto={pesos(detalle.subtotal_centavos)} escala="pie" tono="suave" />
+          </View>
           {detalle.descuento_centavos > 0 && (
-            <View style={est.detTotalFila}><Text style={est.detTotalLbl}>Descuento</Text><Text style={est.detTotalVal}>−{pesos(detalle.descuento_centavos)}</Text></View>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 }}>
+              <Txt escala="pie" tono="tenue">Descuento</Txt>
+              <Monto texto={`−${pesos(detalle.descuento_centavos)}`} escala="pie" tono="suave" />
+            </View>
           )}
-          <View style={[est.detTotalFila, est.detTotalFinal]}><Text style={est.detTotalLblFinal}>Total</Text><Text style={est.detTotalValFinal}>{pesos(detalle.total_centavos)}</Text></View>
+          <View
+            style={{
+              flexDirection: "row",
+              justifyContent: "space-between",
+              borderTopWidth: 1,
+              borderTopColor: T.borde,
+              marginTop: T.esps.xs,
+              paddingTop: T.esps.sm,
+            }}
+          >
+            <Txt escala="cuerpo" fuerte>Total</Txt>
+            <Monto texto={pesos(detalle.total_centavos)} escala="cuerpo" />
+          </View>
         </View>
 
-        <View style={{ marginTop: 20, gap: 10 }}>
+        <View style={{ marginTop: T.esps.xl, gap: T.esps.sm }}>
           <Boton titulo="Compartir" tipo="secundario" onPress={compartir} />
           {detalle.estado === "abierta" && (
             <Boton titulo="Convertir a venta" onPress={convertirAVenta} />
@@ -408,9 +470,9 @@ export default function ModalCotizaciones({
           {detalle.estado === "abierta" && (
             <Boton titulo="Cancelar cotización" tipo="peligro" onPress={cancelar} />
           )}
-          <Boton titulo="Eliminar" tipo="fantasma" onPress={eliminar} />
+          <Boton titulo="Eliminar" tipo="fantasma" onPress={() => setConfirmandoBorrado(true)} />
         </View>
-        <View style={{ height: 40 }} />
+        <View style={{ height: T.esps.xxl }} />
       </ScrollView>
     );
   }
@@ -418,9 +480,9 @@ export default function ModalCotizaciones({
   function VistaBuscadorProducto() {
     return (
       <Modal visible animationType="slide" onRequestClose={() => setBuscadorAbierto(false)}>
-        <SafeAreaView style={est.raiz}>
+        <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
           <CabeceraModal titulo="Del catálogo" izquierda="Cerrar" onIzquierda={() => setBuscadorAbierto(false)} />
-          <View style={est.cuerpo}>
+          <View style={{ padding: T.esp }}>
             <TextInput
               style={estiloInput}
               value={busquedaProd}
@@ -430,15 +492,21 @@ export default function ModalCotizaciones({
               autoFocus
             />
           </View>
-          <ScrollView contentContainerStyle={est.cuerpo}>
-            {resultadosFiltrados.map((p) => (
-              <Pressable key={p.id} style={({ pressed }) => [est.fila, pressed && { backgroundColor: T.superficie3 }]} onPress={() => agregarProducto(p)}>
-                <View style={{ flex: 1 }}>
-                  <Text style={est.filaNombre} numberOfLines={1}>{p.nombre}</Text>
-                </View>
-                <Text style={est.filaTotal}>{pesos(p.precio_venta_centavos)}</Text>
-              </Pressable>
-            ))}
+          <ScrollView contentContainerStyle={{ paddingHorizontal: T.esp }}>
+            {resultadosFiltrados.length === 0 ? (
+              <Vacio titulo="Sin resultados" texto="Prueba con otro nombre o código." />
+            ) : (
+              <Grupo>
+                {resultadosFiltrados.map((p) => (
+                  <Fila
+                    key={p.id}
+                    titulo={p.nombre}
+                    onPress={() => agregarProducto(p)}
+                    valor={<Monto texto={pesos(p.precio_venta_centavos)} escala="pie" />}
+                  />
+                ))}
+              </Grupo>
+            )}
           </ScrollView>
         </SafeAreaView>
       </Modal>
@@ -455,7 +523,7 @@ export default function ModalCotizaciones({
 
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
           <CabeceraModal titulo={cabecera.titulo} izquierda={cabecera.izquierda} onIzquierda={cabecera.onIzquierda} />
           {vista === "lista" && VistaLista()}
@@ -464,48 +532,25 @@ export default function ModalCotizaciones({
         </KeyboardAvoidingView>
       </SafeAreaView>
       {buscadorAbierto && VistaBuscadorProducto()}
+
+      {/* Confirmación de borrado: antes NO existía ninguna — ni Alert ni
+          hoja propia. Se tocaba "Eliminar" y desaparecía sin poder
+          arrepentirte. */}
+      <Hoja
+        visible={confirmandoBorrado}
+        onCerrar={() => setConfirmandoBorrado(false)}
+        titulo="Eliminar cotización"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Eliminar" tipo="peligro" onPress={confirmarEliminar} />
+            <Boton titulo="Cancelar" tipo="secundario" onPress={() => setConfirmandoBorrado(false)} />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {detalle ? `¿Eliminar la cotización #${detalle.folio}? No se puede deshacer.` : ""}
+        </Txt>
+      </Hoja>
     </Modal>
   );
-}
-
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp },
-    vacio: { color: T.textoTenue, textAlign: "center", marginTop: 26, fontSize: 14.5, lineHeight: 22, paddingHorizontal: 20 },
-    fila: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 14, marginBottom: 8,
-    },
-    filaIcono: {
-      width: 38, height: 38, borderRadius: 11,
-      backgroundColor: T.acento + "1f", borderWidth: 1, borderColor: T.acento + "44",
-      alignItems: "center", justifyContent: "center",
-    },
-    filaNombre: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    filaMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    filaTotal: { color: T.texto, fontSize: 15, fontWeight: "800" },
-
-    subLbl: { color: T.textoTenue, fontSize: 12, fontWeight: "700", marginTop: 6, marginBottom: 8, letterSpacing: 0.4 },
-    lineaCaja: {
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 10, marginBottom: 8,
-    },
-    quitarBtn: { width: 44, alignItems: "center", justifyContent: "center" },
-    quitarTxt: { color: T.textoTenue, fontSize: 20 },
-    totalTxt: { color: T.texto, fontSize: 17, fontWeight: "800", textAlign: "right", marginTop: 10, marginBottom: 14 },
-
-    detEstado: { color: T.textoTenue, fontSize: 13, fontWeight: "700", marginBottom: 12 },
-    detLinea: { flexDirection: "row", justifyContent: "space-between", gap: 10, paddingVertical: 6 },
-    detLineaTxt: { color: T.texto, fontSize: 14, flex: 1 },
-    detLineaTotal: { color: T.texto, fontSize: 14, fontWeight: "700" },
-    detTotales: { borderTopWidth: 1, borderTopColor: T.borde, marginTop: 8, paddingTop: 8 },
-    detTotalFila: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 3 },
-    detTotalLbl: { color: T.textoTenue, fontSize: 13 },
-    detTotalVal: { color: T.textoTenue, fontSize: 13 },
-    detTotalFinal: { borderTopWidth: 1, borderTopColor: T.borde, marginTop: 6, paddingTop: 8 },
-    detTotalLblFinal: { color: T.texto, fontSize: 16, fontWeight: "800" },
-    detTotalValFinal: { color: T.texto, fontSize: 16, fontWeight: "800" },
-  });
 }

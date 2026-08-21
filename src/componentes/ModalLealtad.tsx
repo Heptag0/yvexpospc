@@ -3,26 +3,45 @@
 // Lista con buscador + saldo de puntos, alta rápida (nombre + teléfono
 // opcional) y detalle por cliente: tarjeta QR, saldo grande, "Registrar
 // visita" (máx. 1 al día), historial de movimientos y edición/borrado suave.
+//
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// 1. NO se migró a <Hoja>. Este modal tiene 4 sub-vistas (lista/nuevo/
+//    detalle/editar) con un header que cambia de título y de botones según
+//    dónde estás — <Hoja> solo admite un header fijo. Forzarlo habría sido
+//    peor que no usarlo: se mantiene <CabeceraModal> directo (ya construido
+//    con tokens correctos) y se cambian sus props según `vista`, igual que
+//    hacía el original.
+// 2. Por lo mismo, esta pantalla SÍ necesitaba su propio BackHandler — el
+//    mismo arreglo que se hizo en Vender para el drill-down de
+//    departamentos. Sin él, el botón Atrás de Android cerraba todo el
+//    modal desde "detalle" o "editar" en vez de retroceder un nivel.
+// 3. Alert.alert (quitar cliente) -> una <Hoja> chica anidada, igual que en
+//    ModalDepartamentos y FormularioProducto.
+// 4. El saldo de puntos en el detalle pasa a <Lamina> — es la cifra
+//    protagonista de esa pantalla (la razón por la que el cajero abrió la
+//    tarjeta del cliente), con el mismo tratamiento "con luz" que ya usan
+//    Inicio e Inventario para SU métrica principal.
+// 5. La lista de clientes pasa a <Fila>, con <Monto> para el saldo — antes
+//    era un estilo de fila y un chip propios, ahora el mismo lenguaje que
+//    el resto de listas de la app.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   View,
-  Text,
   TextInput,
-  Pressable,
-  StyleSheet,
   Modal,
   FlatList,
   ScrollView,
   KeyboardAvoidingView,
   Platform,
-  Alert,
   Share,
+  BackHandler,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, useEstiloInput } from "@/src/componentes/ui";
-import { IconoUI } from "@/src/componentes/iconos";
+import { Boton, Banner, CabeceraModal, Hoja, Grupo, Fila, Lamina, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
 import CodigoCliente from "@/src/componentes/CodigoCliente";
 import { pesos, fmtFecha } from "@/src/base/formato";
 import {
@@ -40,7 +59,6 @@ import {
 } from "@/src/base/lealtad";
 import { leerNombreNegocio } from "@/src/base/giro";
 
-type Tema = ReturnType<typeof useTema>["tema"];
 type Vista = "lista" | "nuevo" | "detalle" | "editar";
 
 export default function ModalLealtad({
@@ -51,7 +69,6 @@ export default function ModalLealtad({
   onCambio?: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
 
   const [vista, setVista] = useState<Vista>("lista");
@@ -62,6 +79,7 @@ export default function ModalLealtad({
   const [reglas, setReglas] = useState<ReglasLealtad | null>(null);
   const [aviso, setAviso] = useState<{ texto: string; tipo: "exito" | "info" } | null>(null);
   const [error, setError] = useState("");
+  const [confirmandoQuitar, setConfirmandoQuitar] = useState(false);
 
   // Formulario (alta / edición)
   const [nombre, setNombre] = useState("");
@@ -78,6 +96,30 @@ export default function ModalLealtad({
   useEffect(() => {
     void cargar();
   }, [cargar]);
+
+  // Atrás del sistema: retrocede un nivel del drill-down en vez de cerrar
+  // todo el modal. En "lista" no hace falta nada — el <Modal> ya cierra
+  // solo vía onRequestClose={onCerrar}.
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (vista === "editar") {
+        setVista("detalle");
+        return true;
+      }
+      if (vista === "detalle") {
+        setSeleccionado(null);
+        setVista("lista");
+        return true;
+      }
+      if (vista === "nuevo") {
+        setVista("lista");
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+  }, [vista]);
 
   async function abrirDetalle(c: Cliente) {
     setSeleccionado(c);
@@ -193,26 +235,14 @@ export default function ModalLealtad({
     }
   }
 
-  function confirmarEliminar() {
+  async function confirmarEliminar() {
     if (!seleccionado) return;
-    Alert.alert(
-      "Quitar cliente",
-      `${seleccionado.nombre} dejará de aparecer en tu lista, pero su historial se conserva. ¿Continuar?`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Quitar",
-          style: "destructive",
-          onPress: async () => {
-            await eliminarCliente(seleccionado.id);
-            await cargar();
-            onCambio?.();
-            setSeleccionado(null);
-            setVista("lista");
-          },
-        },
-      ]
-    );
+    await eliminarCliente(seleccionado.id);
+    await cargar();
+    onCambio?.();
+    setConfirmandoQuitar(false);
+    setSeleccionado(null);
+    setVista("lista");
   }
 
   const etiquetaTipo = (t: MovimientoPuntos["tipo"]) =>
@@ -220,7 +250,7 @@ export default function ModalLealtad({
 
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
           behavior={Platform.OS === "ios" ? "padding" : undefined}
@@ -269,7 +299,7 @@ export default function ModalLealtad({
           {/* ---------------- LISTA ---------------- */}
           {vista === "lista" && (
             <>
-              <View style={est.buscadorCaja}>
+              <View style={{ paddingHorizontal: T.esp, paddingVertical: T.esps.sm }}>
                 <TextInput
                   style={estiloInput}
                   placeholder="Busca por nombre, teléfono, correo o código…"
@@ -281,41 +311,44 @@ export default function ModalLealtad({
               <FlatList
                 data={clientes}
                 keyExtractor={(c) => c.id}
-                contentContainerStyle={{ paddingHorizontal: T.esp, paddingBottom: 20 }}
+                contentContainerStyle={{ paddingHorizontal: T.esp, paddingBottom: T.esps.xl }}
                 ListEmptyComponent={
-                  <Text style={est.vacio}>
-                    {busqueda
-                      ? "Sin resultados. ¿Lo damos de alta con «+ Nuevo»?"
-                      : "Aún no tienes clientes. Toca «+ Nuevo» para registrar al primero: gana puntos en cada compra y en cada visita."}
-                  </Text>
+                  <Vacio
+                    titulo={busqueda ? "Sin resultados" : "Aún no tienes clientes"}
+                    texto={
+                      busqueda
+                        ? "¿Lo damos de alta con «+ Nuevo»?"
+                        : "Toca «+ Nuevo» para registrar al primero: gana puntos en cada compra y en cada visita."
+                    }
+                  />
                 }
-                renderItem={({ item }) => (
-                  <Pressable
-                    style={({ pressed }) => [
-                      est.filaCliente,
-                      pressed && { backgroundColor: T.superficie3 },
-                    ]}
-                    onPress={() => abrirDetalle(item)}
-                  >
-                    <View style={est.avatar}>
-                      <Text style={est.avatarTxt}>
-                        {item.nombre.trim()[0]?.toUpperCase() ?? "?"}
-                      </Text>
-                    </View>
-                    <View style={{ flex: 1 }}>
-                      <Text style={est.filaNombre} numberOfLines={1}>
-                        {item.nombre}
-                      </Text>
-                      <Text style={est.filaMeta}>
-                        {item.codigo}
-                        {item.telefono ? ` · ${item.telefono}` : ""}
-                      </Text>
-                    </View>
-                    <View style={est.saldoChip}>
-                      <IconoUI id="regalo" size={13} color={T.acento} />
-                      <Text style={est.saldoTxt}>{item.puntos} pts</Text>
-                    </View>
-                  </Pressable>
+                renderItem={({ item, index }) => (
+                  <View style={{ marginBottom: index === clientes.length - 1 ? 0 : T.esps.sm }}>
+                    <Grupo>
+                      <Fila
+                        titulo={item.nombre}
+                        meta={`${item.codigo}${item.telefono ? ` · ${item.telefono}` : ""}`}
+                        icono={
+                          <View
+                            style={{
+                              width: 40,
+                              height: 40,
+                              borderRadius: T.radioChico,
+                              backgroundColor: T.acentoSuave,
+                              alignItems: "center",
+                              justifyContent: "center",
+                            }}
+                          >
+                            <Txt escala="cuerpo" tono="acento" fuerte>
+                              {item.nombre.trim()[0]?.toUpperCase() ?? "?"}
+                            </Txt>
+                          </View>
+                        }
+                        onPress={() => abrirDetalle(item)}
+                        valor={<Monto texto={`${item.puntos} pts`} escala="pie" tono="acento" />}
+                      />
+                    </Grupo>
+                  </View>
                 )}
               />
             </>
@@ -323,11 +356,13 @@ export default function ModalLealtad({
 
           {/* ---------------- ALTA / EDICIÓN ---------------- */}
           {(vista === "nuevo" || vista === "editar") && (
-            <ScrollView contentContainerStyle={{ padding: T.esp }}>
+            <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
               <Banner texto={error} tipo="error" />
-              <Text style={est.campoLbl}>NOMBRE</Text>
+              <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+                Nombre
+              </Txt>
               <TextInput
-                style={[estiloInput, { marginBottom: 16 }]}
+                style={[estiloInput, { marginBottom: T.esps.lg }]}
                 value={nombre}
                 onChangeText={setNombre}
                 placeholder="Ej. Doña Mari"
@@ -335,23 +370,25 @@ export default function ModalLealtad({
                 autoCapitalize="words"
                 autoFocus={vista === "nuevo"}
               />
-              <Text style={est.campoLbl}>TELÉFONO (OPCIONAL)</Text>
+              <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+                Teléfono (opcional)
+              </Txt>
               <TextInput
-                style={[estiloInput, { marginBottom: 16 }]}
+                style={[estiloInput, { marginBottom: T.esps.lg }]}
                 value={telefono}
                 onChangeText={setTelefono}
                 placeholder="Para identificarlo sin QR"
                 placeholderTextColor={T.textoTenue}
                 keyboardType="phone-pad"
               />
-              <Text style={est.campoLbl}>CORREO (OPCIONAL)</Text>
+              <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+                Correo (opcional)
+              </Txt>
               <TextInput
                 style={[
                   estiloInput,
-                  { marginBottom: correo.trim() !== "" && !correoValido(correo) ? 4 : 16 },
-                  correo.trim() !== "" && !correoValido(correo) && {
-                    borderColor: T.peligro,
-                  },
+                  { marginBottom: correo.trim() !== "" && !correoValido(correo) ? T.esps.xs : T.esps.lg },
+                  correo.trim() !== "" && !correoValido(correo) && { borderColor: T.peligro },
                 ]}
                 value={correo}
                 onChangeText={setCorreo}
@@ -362,15 +399,17 @@ export default function ModalLealtad({
                 autoCorrect={false}
               />
               {correo.trim() !== "" && !correoValido(correo) && (
-                <Text style={est.correoAviso}>
+                <Txt escala="pie" tono="peligro" estilo={{ marginBottom: T.esps.lg }}>
                   Ese correo no parece válido; puedes guardar sin correo y corregirlo después.
-                </Text>
+                </Txt>
               )}
               {vista === "editar" && (
                 <>
-                  <Text style={est.campoLbl}>NOTAS (OPCIONAL)</Text>
+                  <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+                    Notas (opcional)
+                  </Txt>
                   <TextInput
-                    style={[estiloInput, { marginBottom: 16 }]}
+                    style={[estiloInput, { marginBottom: T.esps.lg }]}
                     value={notas}
                     onChangeText={setNotas}
                     placeholder="Ej. siempre pide fiado los viernes"
@@ -386,8 +425,8 @@ export default function ModalLealtad({
                 deshabilitado={nombre.trim() === ""}
               />
               {vista === "editar" && (
-                <View style={{ marginTop: 14 }}>
-                  <Boton titulo="Quitar cliente" tipo="peligro" onPress={confirmarEliminar} />
+                <View style={{ marginTop: T.esps.md }}>
+                  <Boton titulo="Quitar cliente" tipo="peligro" onPress={() => setConfirmandoQuitar(true)} />
                 </View>
               )}
             </ScrollView>
@@ -395,151 +434,116 @@ export default function ModalLealtad({
 
           {/* ---------------- DETALLE ---------------- */}
           {vista === "detalle" && seleccionado && (
-            <ScrollView contentContainerStyle={{ padding: T.esp, paddingBottom: 30 }}>
+            <ScrollView contentContainerStyle={{ padding: T.esp, paddingBottom: T.esps.xxl }}>
               {aviso && <Banner texto={aviso.texto} tipo={aviso.tipo} />}
 
               {/* Tarjeta QR */}
-              <View style={est.tarjetaQr}>
+              <View
+                style={{
+                  backgroundColor: T.superficie,
+                  borderWidth: 1,
+                  borderColor: T.borde,
+                  borderRadius: T.radioGrande,
+                  padding: T.esps.lg,
+                  alignItems: "center",
+                }}
+              >
                 <CodigoCliente codigo={seleccionado.codigo} size={190} />
               </View>
 
               {/* Contacto (si existe): servirá después para promociones */}
               {(seleccionado.telefono || seleccionado.correo) && (
-                <Text style={est.contacto}>
-                  {[seleccionado.telefono, seleccionado.correo]
-                    .filter(Boolean)
-                    .join(" · ")}
-                </Text>
+                <Txt escala="pie" tono="suave" estilo={{ textAlign: "center", marginTop: T.esps.md }}>
+                  {[seleccionado.telefono, seleccionado.correo].filter(Boolean).join(" · ")}
+                </Txt>
               )}
 
-              {/* Regla vigente, en lenguaje de mostrador */}
-              {reglas && reglas.activa && (
-                <Text style={est.reglaTxt}>
-                  Gana 1 punto por cada {pesos(reglas.pesosPorPunto * 100)} · 1 punto ={" "}
-                  {pesos(reglas.valorPuntoCentavos)} al canjear
-                </Text>
-              )}
-
-              <View style={{ marginTop: 14 }}>
+              <View style={{ marginTop: T.esps.md }}>
                 <Boton titulo="Compartir código" tipo="secundario" onPress={compartirCliente} />
               </View>
 
-              {/* Saldo grande */}
-              <View style={est.saldoCaja}>
-                <Text style={est.saldoVal}>{seleccionado.puntos}</Text>
-                <Text style={est.saldoLbl}>
-                  puntos · valen {pesos(seleccionado.puntos * (reglas?.valorPuntoCentavos ?? 0))} al canjear
-                </Text>
+              {/* Saldo — la cifra protagonista de esta pantalla: es la razón
+                  por la que el cajero abrió la tarjeta del cliente. */}
+              <View style={{ marginTop: T.esps.xl, marginBottom: T.esps.lg }}>
+                <Lamina>
+                  <Txt escala="micro" tono="suave" fuerte mayus>
+                    Saldo de puntos
+                  </Txt>
+                  <View style={{ marginTop: T.esps.xs }}>
+                    <Monto texto={String(seleccionado.puntos)} escala="protagonista" />
+                  </View>
+                  <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+                    valen {pesos(seleccionado.puntos * (reglas?.valorPuntoCentavos ?? 0))} al canjear
+                  </Txt>
+                  {reglas && reglas.activa ? (
+                    <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.sm }}>
+                      Gana 1 punto por cada {pesos(reglas.pesosPorPunto * 100)} · 1 punto ={" "}
+                      {pesos(reglas.valorPuntoCentavos)} al canjear
+                    </Txt>
+                  ) : null}
+                </Lamina>
               </View>
 
               <Boton
                 titulo={`Registrar visita (+${reglas?.puntosVisita ?? 0} pts)`}
                 onPress={alRegistrarVisita}
               />
-              <Text style={est.visitaAyuda}>
+              <Txt escala="pie" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.sm }}>
                 Un regalito por pasar a saludar: una vez al día por cliente.
-              </Text>
+              </Txt>
 
               {/* Historial */}
-              <Text style={[est.campoLbl, { marginTop: 22, marginBottom: 8 }]}>
-                HISTORIAL DE PUNTOS
-              </Text>
-              {historial.length === 0 ? (
-                <Text style={est.vacioChico}>
-                  Sin movimientos todavía. Aquí aparecerán sus compras, visitas y canjes.
-                </Text>
-              ) : (
-                historial.map((m) => (
-                  <View key={m.id} style={est.mov}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={est.movTipo}>{etiquetaTipo(m.tipo)}</Text>
-                      <Text style={est.movMeta}>
-                        {fmtFecha(m.creado_en)}
-                        {m.nota ? ` · ${m.nota}` : ""}
-                      </Text>
-                    </View>
-                    <Text
-                      style={[
-                        est.movPuntos,
-                        { color: m.puntos >= 0 ? T.exito : T.peligro },
-                      ]}
-                    >
-                      {m.puntos >= 0 ? `+${m.puntos}` : m.puntos}
-                    </Text>
-                  </View>
-                ))
-              )}
+              <View style={{ marginTop: T.esps.xl }}>
+                <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
+                  Historial de puntos
+                </Txt>
+                {historial.length === 0 ? (
+                  <Txt escala="pie" tono="tenue">
+                    Sin movimientos todavía. Aquí aparecerán sus compras, visitas y canjes.
+                  </Txt>
+                ) : (
+                  <Grupo>
+                    {historial.map((m) => (
+                      <Fila
+                        key={m.id}
+                        titulo={etiquetaTipo(m.tipo)}
+                        meta={`${fmtFecha(m.creado_en)}${m.nota ? ` · ${m.nota}` : ""}`}
+                        flecha={false}
+                        valor={
+                          <Monto
+                            texto={m.puntos >= 0 ? `+${m.puntos}` : String(m.puntos)}
+                            escala="pie"
+                            tono={m.puntos >= 0 ? "exito" : "peligro"}
+                          />
+                        }
+                      />
+                    ))}
+                  </Grupo>
+                )}
+              </View>
             </ScrollView>
           )}
         </KeyboardAvoidingView>
+
+        {/* Confirmación de quitar cliente: hoja chica, sin Alert nativo. */}
+        <Hoja
+          visible={confirmandoQuitar}
+          onCerrar={() => setConfirmandoQuitar(false)}
+          titulo="Quitar cliente"
+          pie={
+            <View style={{ gap: T.esps.sm }}>
+              <Boton titulo="Quitar" tipo="peligro" onPress={confirmarEliminar} />
+              <Boton titulo="Cancelar" tipo="secundario" onPress={() => setConfirmandoQuitar(false)} />
+            </View>
+          }
+        >
+          <Txt escala="pie" tono="suave">
+            {seleccionado
+              ? `${seleccionado.nombre} dejará de aparecer en tu lista, pero su historial se conserva.`
+              : ""}
+          </Txt>
+        </Hoja>
       </SafeAreaView>
     </Modal>
   );
-}
-
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    buscadorCaja: { paddingHorizontal: T.esp, paddingVertical: 10 },
-    vacio: {
-      color: T.textoTenue, fontSize: 14.5, textAlign: "center",
-      marginTop: 50, paddingHorizontal: 36, lineHeight: 22,
-    },
-    vacioChico: { color: T.textoTenue, fontSize: 13, lineHeight: 19 },
-    filaCliente: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 12, marginBottom: 8,
-    },
-    avatar: {
-      width: 40, height: 40, borderRadius: 12,
-      backgroundColor: T.acento + "1f", borderWidth: 1, borderColor: T.acento + "44",
-      alignItems: "center", justifyContent: "center",
-    },
-    avatarTxt: { color: T.acento, fontSize: 16, fontWeight: "800" },
-    filaNombre: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    filaMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    saldoChip: {
-      flexDirection: "row", alignItems: "center", gap: 5,
-      backgroundColor: T.acentoSuave, borderWidth: 1, borderColor: T.acento + "66",
-      borderRadius: 999, paddingHorizontal: 10, paddingVertical: 5,
-    },
-    saldoTxt: { color: T.acento, fontSize: 12.5, fontWeight: "800", fontVariant: ["tabular-nums"] },
-    campoLbl: {
-      color: T.textoSuave, fontSize: 12, fontWeight: "800",
-      letterSpacing: 0.6, marginBottom: 7,
-    },
-    tarjetaQr: {
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radioGrande, padding: 18, alignItems: "center",
-    },
-    saldoCaja: { alignItems: "center", paddingVertical: 18 },
-    saldoVal: {
-      color: T.texto, fontSize: 46, fontWeight: "900",
-      letterSpacing: -1.5, fontVariant: ["tabular-nums"],
-    },
-    saldoLbl: { color: T.textoSuave, fontSize: 13, marginTop: 2 },
-    visitaAyuda: {
-      color: T.textoTenue, fontSize: 12, textAlign: "center",
-      marginTop: 10, paddingHorizontal: 20,
-    },
-    contacto: {
-      color: T.textoSuave, fontSize: 13.5, textAlign: "center", marginTop: 12,
-    },
-    reglaTxt: {
-      color: T.textoTenue, fontSize: 12, textAlign: "center",
-      marginTop: 6, paddingHorizontal: 20,
-    },
-    correoAviso: {
-      color: T.peligro, fontSize: 12, marginBottom: 14, lineHeight: 17,
-    },
-    mov: {
-      flexDirection: "row", alignItems: "center", gap: 10,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radioChico + 2, padding: 11, marginBottom: 7,
-    },
-    movTipo: { color: T.texto, fontSize: 13.5, fontWeight: "800" },
-    movMeta: { color: T.textoTenue, fontSize: 11.5, marginTop: 2 },
-    movPuntos: { fontSize: 15, fontWeight: "900", fontVariant: ["tabular-nums"] },
-  });
 }

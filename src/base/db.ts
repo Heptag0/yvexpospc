@@ -11,7 +11,7 @@
 
 import * as SQLite from "expo-sqlite";
 
-const VERSION_ESQUEMA = 22;
+const VERSION_ESQUEMA = 28;
 const NOMBRE_BD = "yvexpos.db";
 
 let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -152,6 +152,148 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+  }
+
+  if (actual < 23) {
+    // v23 — Conteo a ciegas del corte + bolsa de sobrante/faltante.
+    //
+    // efectivo_contado_centavos / diferencia_centavos son LOCALES a
+    // propósito, mismo criterio que productos.en_tienda (v16): el backend
+    // no conoce estas columnas, así que NUNCA se agregan al payload de
+    // encolar() en cerrarTurno() — hacerlo rompería algo que hoy funciona
+    // sin necesidad. Si el conteo a ciegas está apagado (por defecto),
+    // ambas quedan en NULL para siempre: no se le pide nada al cajero.
+    //
+    // bolsa_movimientos: LOCAL-ONLY, mismo punto de partida que
+    // proveedores/compras (v13) y clientes/lealtad (v14) antes de tener
+    // soporte en el backend. Una sola bolsa del negocio (no por cajero) —
+    // cada fila queda atribuida a qué usuario cerró ESE turno, para que el
+    // dueño pueda ver si un cajero en particular acumula faltantes.
+    try {
+      await db.execAsync(
+        "ALTER TABLE caja_sesiones ADD COLUMN efectivo_contado_centavos INTEGER;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    try {
+      await db.execAsync(
+        "ALTER TABLE caja_sesiones ADD COLUMN diferencia_centavos INTEGER;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await db.execAsync(ESQUEMA_V23);
+  }
+
+  if (actual < 24) {
+    // v24 — Alinear las columnas del conteo a ciegas con lo que sync.py YA
+    // espera en caja_sesiones. Se descubrió que el backend ya tiene
+    // `total_efectivo_esperado_centavos` / `total_efectivo_contado_centavos`
+    // / `diferencia_centavos` en su MAPA — el PC probablemente ya hace algo
+    // parecido al conteo a ciegas. La v23 usó nombres propios
+    // (`efectivo_contado_centavos`, sin persistir el esperado) sin saber
+    // esto; con el renombre, el conteo del móvil puede sincronizar de
+    // verdad en vez de quedarse solo local.
+    //
+    // RENAME COLUMN, no un ALTER+borrar+crear: conserva los datos que ya
+    // hubiera en dispositivos donde la v23 alcanzó a correr. Si la columna
+    // vieja nunca existió (instalación nueva que arranca directo en v24,
+    // o un dispositivo donde la v23 ya se corrió con este nombre nuevo por
+    // algún motivo), el RENAME falla y el catch lo deja pasar.
+    try {
+      await db.execAsync(
+        "ALTER TABLE caja_sesiones RENAME COLUMN efectivo_contado_centavos TO total_efectivo_contado_centavos;"
+      );
+    } catch {
+      // Ya se llamaba así, o la columna vieja nunca existió: seguimos.
+    }
+    try {
+      await db.execAsync(
+        "ALTER TABLE caja_sesiones ADD COLUMN total_efectivo_esperado_centavos INTEGER;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
+  if (actual < 25) {
+    // v25 — dispositivo_id en caja_sesiones. El PC ya lo tenía desde su
+    // esquema inicial (001_inicial.sql) y filtra por él en
+    // sesion_abierta(); el móvil nunca lo tuvo. Sin esta columna,
+    // turnoActivo() no puede distinguir "mi turno abierto" de un turno
+    // abierto en OTRO dispositivo que ya bajó por sync — el más reciente
+    // gana sin importar de quién era, y un cajero podría terminar
+    // vendiendo o cerrando el turno de otra caja sin darse cuenta.
+    //
+    // NULL para los turnos que ya existan (locales, de antes de esta
+    // columna, o abiertos antes de vincular cuenta — dispositivoId no
+    // existe hasta ese momento, ver nube.ts): turnoActivo() los sigue
+    // reconociendo como propios porque son los únicos que puede haber
+    // sin dispositivo_id.
+    try {
+      await db.execAsync(
+        "ALTER TABLE caja_sesiones ADD COLUMN dispositivo_id TEXT;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
+  if (actual < 26) {
+    await db.execAsync(ESQUEMA_V26);
+  }
+
+  if (actual < 27) {
+    // v27 — producto_id en perfiles_etiqueta. El PC ya lo tenía: cuando
+    // una receta se manda al catálogo, crea el producto Y un perfil de
+    // etiqueta NOM-051 automático, VINCULADO a ese producto. Sin esta
+    // columna, el móvil podía crear el perfil pero no enlazarlo — perdía
+    // justo la parte que hace útil la automatización.
+    try {
+      await db.execAsync(
+        "ALTER TABLE perfiles_etiqueta ADD COLUMN producto_id TEXT REFERENCES productos(id);"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+  }
+
+  if (actual < 28) {
+    // v28 — Crédito (cobranza). Puerto del modelo de clientes.rs del PC:
+    //   - clientes.limite_credito_centavos / saldo_centavos: el límite
+    //     AVISA, no bloquea (la decisión es del cajero/dueño) — igual que
+    //     el PC. limite = 0 significa "sin límite definido".
+    //   - movimientos_cuenta: 'cargo' (venta a crédito, sube el saldo) o
+    //     'abono' (pago, lo baja). La suma reconstruye el saldo — rastro
+    //     auditable, igual que ajustes_inventario con el stock.
+    //
+    // Nombres de columna en clientes IDÉNTICOS a los que sync.py ya espera
+    // (confirmado: su MAPA ya tiene "limite_credito_centavos" y
+    // "saldo_centavos" en clientes) — el backend ya sabía recibir esto,
+    // solo el móvil no lo tenía, mismo patrón que se encontró con el
+    // conteo a ciegas en caja_sesiones.
+    //
+    // movimientos_cuenta NO se agrega al MAPA de sync.py todavía — se
+    // revisó y esa entidad no está ahí (aunque el PC sí la encola). Por
+    // ahora se queda LOCAL-ONLY aquí también: encolarla sin que el
+    // servidor la acepte no serviría de nada, solo la dejaría en
+    // cola_sync sin nunca aplicarse.
+    try {
+      await db.execAsync(
+        "ALTER TABLE clientes ADD COLUMN limite_credito_centavos INTEGER NOT NULL DEFAULT 0;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    try {
+      await db.execAsync(
+        "ALTER TABLE clientes ADD COLUMN saldo_centavos INTEGER NOT NULL DEFAULT 0;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await db.execAsync(ESQUEMA_V28);
   }
 
   if (actual < VERSION_ESQUEMA) {
@@ -745,4 +887,134 @@ CREATE TABLE IF NOT EXISTS perfiles_etiqueta (
   creado_en          TEXT NOT NULL,
   actualizado_en     TEXT NOT NULL
 );
+`;
+
+// v23 — Bolsa de sobrante/faltante del corte de turno.
+//
+// Una sola bolsa del negocio (no una por cajero): cada fila queda atribuida
+// a qué usuario cerró ESE turno con esa diferencia, así el dueño puede
+// filtrar/sumar por usuario y detectar si alguien acumula faltantes sin
+// tener que abrir una tabla por persona.
+//
+// LOCAL-ONLY, mismo punto de partida que proveedores/compras (v13) y
+// clientes/lealtad (v14): el backend todavía no la tiene. Las columnas
+// nuevas de caja_sesiones (efectivo_contado_centavos, diferencia_centavos)
+// se agregan por separado arriba, con try/catch, porque son ALTER TABLE
+// sobre una tabla existente — no pueden ir en este bloque de solo CREATE.
+const ESQUEMA_V23 = `
+CREATE TABLE IF NOT EXISTS bolsa_movimientos (
+  id                  TEXT PRIMARY KEY,
+  caja_sesion_id      TEXT NOT NULL REFERENCES caja_sesiones(id),
+  usuario_pos_id      TEXT REFERENCES usuarios_pos(id),
+  diferencia_centavos INTEGER NOT NULL,
+  creado_en           TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_bolsa_sesion ON bolsa_movimientos(caja_sesion_id);
+CREATE INDEX IF NOT EXISTS idx_bolsa_usuario ON bolsa_movimientos(usuario_pos_id);
+`;
+
+// v26 — Despensa de ingredientes + Recetas (costeo de productos fabricados).
+//
+// Puerto de despensa.rs y recetas.rs del PC. Mismos nombres de columna,
+// mismos tipos — con una diferencia deliberada: el PC guarda dispositivo_id
+// en estas tablas (arrastra el patrón general de su esquema), pero el móvil
+// NUNCA lo hace en tablas local-only (proveedores, clientes, cotizaciones,
+// perfiles_etiqueta tampoco lo tienen) — se omite aquí por la misma razón:
+// no hay noción de multi-dispositivo para datos que nunca salen de este
+// teléfono. Ver la nota de sync en recetas.ts sobre qué implica esto.
+//
+// despensa_ingredientes: insumos que se COMPRAN a granel para fabricar
+//   (harina, queso crema, cajas...). NUNCA son productos de venta — son
+//   catálogos deliberadamente separados (ver despensa.rs). Nutrición
+//   opcional, capturada a mano o rellenada por búsqueda en Open Food Facts.
+//
+// recetas: costeo de un producto fabricado a partir de ingredientes de la
+//   despensa. `margen_deseado_pct` y `producto_id` (si ya se mandó al
+//   catálogo) viven aquí; el costo NO se guarda como columna — se calcula
+//   sumando receta_lineas.costo_congelado_centavos, igual que el PC.
+//
+// receta_lineas: cada ingrediente usado, con su costo CONGELADO al momento
+//   de guardar (mismo principio que costo_unitario_centavos en
+//   venta_lineas) — no se recalcula solo si el ingrediente cambia de precio
+//   en la despensa. `orden` preserva el orden de captura al reemplazar
+//   todas las líneas de una receta (mismo patrón que kit_componentes).
+//
+// LOCAL-ONLY (v1), mismo criterio que perfiles_etiqueta.
+const ESQUEMA_V26 = `
+CREATE TABLE IF NOT EXISTS despensa_ingredientes (
+  id                        TEXT PRIMARY KEY,
+  nombre                    TEXT NOT NULL,
+  unidad                    TEXT NOT NULL,
+  tamano_paquete            REAL NOT NULL,
+  costo_paquete_centavos    INTEGER NOT NULL,
+  calorias_kcal             REAL NOT NULL DEFAULT 0,
+  azucares_g                REAL NOT NULL DEFAULT 0,
+  grasas_saturadas_g        REAL NOT NULL DEFAULT 0,
+  grasas_trans_g            REAL NOT NULL DEFAULT 0,
+  sodio_mg                  REAL NOT NULL DEFAULT 0,
+  proteinas_g               REAL NOT NULL DEFAULT 0,
+  carbohidratos_g           REAL NOT NULL DEFAULT 0,
+  grasas_totales_g          REAL NOT NULL DEFAULT 0,
+  fibra_g                   REAL NOT NULL DEFAULT 0,
+  notas                     TEXT,
+  eliminado                 INTEGER NOT NULL DEFAULT 0,
+  creado_en                 TEXT NOT NULL,
+  actualizado_en            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_despensa_nombre ON despensa_ingredientes(nombre);
+
+CREATE TABLE IF NOT EXISTS recetas (
+  id                        TEXT PRIMARY KEY,
+  nombre                    TEXT NOT NULL,
+  rendimiento_cantidad      REAL NOT NULL,
+  rendimiento_unidad        TEXT NOT NULL,
+  margen_deseado_pct        REAL NOT NULL DEFAULT 50,
+  producto_id               TEXT REFERENCES productos(id),
+  notas                     TEXT,
+  eliminado                 INTEGER NOT NULL DEFAULT 0,
+  creado_en                 TEXT NOT NULL,
+  actualizado_en            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recetas_actualizado ON recetas(actualizado_en);
+
+CREATE TABLE IF NOT EXISTS receta_lineas (
+  id                        TEXT PRIMARY KEY,
+  receta_id                 TEXT NOT NULL REFERENCES recetas(id),
+  ingrediente_id            TEXT NOT NULL REFERENCES despensa_ingredientes(id),
+  nombre_congelado          TEXT NOT NULL,
+  unidad                    TEXT NOT NULL,
+  cantidad_usada            REAL NOT NULL,
+  costo_congelado_centavos  INTEGER NOT NULL,
+  orden                     INTEGER NOT NULL DEFAULT 0,
+  creado_en                 TEXT NOT NULL,
+  actualizado_en            TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_receta_lineas_receta ON receta_lineas(receta_id);
+`;
+
+// v28 — movimientos_cuenta: bitácora de cargos y abonos de crédito.
+// Puerto de clientes.rs (movimientos_cuenta) del PC. `tipo` es 'cargo'
+// (venta a crédito, sube el saldo) o 'abono' (pago, lo baja).
+// `saldo_resultante_centavos` es una FOTO del saldo justo después de este
+// movimiento — no se recalcula, se guarda tal como el PC lo hace, para que
+// el estado de cuenta pueda mostrar la evolución sin tener que sumar toda
+// la bitácora en cada consulta.
+//
+// LOCAL-ONLY: ver la nota completa arriba, en el bloque `if (actual < 28)`.
+const ESQUEMA_V28 = `
+CREATE TABLE IF NOT EXISTS movimientos_cuenta (
+  id                          TEXT PRIMARY KEY,
+  cliente_id                  TEXT NOT NULL REFERENCES clientes(id),
+  tipo                        TEXT NOT NULL,
+  monto_centavos              INTEGER NOT NULL,
+  venta_id                    TEXT,
+  metodo                      TEXT,
+  saldo_resultante_centavos   INTEGER NOT NULL,
+  motivo                      TEXT,
+  usuario_pos_id              TEXT,
+  caja_sesion_id              TEXT,
+  creado_en                   TEXT NOT NULL,
+  actualizado_en              TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mov_cuenta_cliente ON movimientos_cuenta(cliente_id);
 `;

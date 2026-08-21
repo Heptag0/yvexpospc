@@ -1,19 +1,34 @@
-// YvexPOS Móvil — Formulario de producto (crear/editar), rediseñado.
+// YvexPOS Móvil — Formulario de producto (crear/editar).
 //
-// ARREGLOS DE RAÍZ de los bugs reportados:
-//   1. Estado viejo entre aperturas: este componente ahora SE MONTA FRESCO en
-//      cada apertura (el padre lo renderiza condicionalmente). El estado
-//      inicial siempre corresponde al producto actual. Además `guardando` ya
-//      no puede quedarse pegado.
-//   2. Errores invisibles: usa <Banner tipo="error"> con contraste garantizado.
-//
-// NUEVO: modo Kit (paquete). Selector Producto/Kit; en modo kit hay un armador
-// de componentes (buscar producto -> añadir con cantidad), el costo se calcula
+// Modo Kit (paquete): selector Producto/Kit; en modo kit hay un armador de
+// componentes (buscar producto -> añadir con cantidad), el costo se calcula
 // de los componentes (como el PC), y el kit no maneja stock propio.
+//
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// 1. "Guardar" pasó de la esquina del header a un botón fijo en el pie,
+//    en la zona del pulgar. <Hoja> no expone un slot de acción en su
+//    cabecera (solo "Cerrar"); en vez de romper esa cáscara para este
+//    archivo, se usa el mismo patrón que ya tienen ModalMovimientoCaja y
+//    las sub-hojas de Ajustes — un botón fijo abajo. Es además más fácil
+//    de alcanzar con el pulgar que una esquina superior.
+// 2. Alert.alert (confirmar borrado) -> una <Hoja> chica anidada, igual que
+//    en ModalDepartamentos. Mismo motivo: el diálogo nativo rompe la
+//    identidad de la app justo en el momento de una decisión importante.
+// 3. T.turquesa (costo del kit, margen positivo) -> T.exito. Son cifras
+//    buenas —el margen no está en rojo—, les toca el verde de la marca, no
+//    un segundo acento que nadie eligió.
+// 4. `Insignia` estaba importada desde antes de esta migración pero nunca
+//    se usó en ningún lado del archivo — import muerto, se quitó.
+//
+// El picker de foto (cámara/galería/recorte/lightbox) y el recortador con
+// gestos se conservan como overlays absolutos, NO como <Modal> anidados —
+// la razón ya estaba documentada en el original y sigue siendo válida: un
+// Modal dentro de otro Modal no siempre cubre toda la pantalla en RN.
 
 import { useEffect, useMemo, useState } from "react";
 import {
-  Modal,
   View,
   Text,
   TextInput,
@@ -21,12 +36,8 @@ import {
   Pressable,
   StyleSheet,
   Switch,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
   Image,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { BlurView } from "expo-blur";
 import * as Haptics from "expo-haptics";
 import {
@@ -49,8 +60,8 @@ import {
 } from "@/src/base/imagenes";
 import ImagenProducto from "@/src/componentes/ImagenProducto";
 import RecortadorFoto from "@/src/componentes/RecortadorFoto";
-import { IconoUI } from "@/src/componentes/iconos";
-import { Boton, Banner, CabeceraModal, Campo, Insignia, useEstiloInput } from "@/src/componentes/ui";
+import { IconoUI, IdUI } from "@/src/componentes/iconos";
+import { Boton, Banner, Campo, Hoja, Txt, Monto, useEstiloInput } from "@/src/componentes/ui";
 import EscanerCamara from "@/src/componentes/EscanerCamara";
 import { consultarNombreUniversal, consultarFichaUniversal } from "@/src/base/codigos";
 
@@ -66,12 +77,9 @@ type Props = {
 
 type CompLocal = { producto_id: string; nombre: string; cantidad: string; costo_centavos: number | null; stock: number };
 
-type Tema = ReturnType<typeof useTema>["tema"];
-
 /** "¿Cómo se vende?" — mismo criterio que el PC (src/vistas/inventario.js):
  *  pieza = piezas enteras · granel = peso/volumen con báscula (kg o litro,
- *  con decimales) · kit = paquete que agrupa otros productos. Reemplaza el
- *  viejo selector "Producto/Kit" + el dropdown suelto de unidad. */
+ *  con decimales) · kit = paquete que agrupa otros productos. */
 type ModoVenta = "pieza" | "granel" | "kit";
 
 /** Deriva el modo inicial de un producto existente, igual que aplicarModo()
@@ -86,8 +94,7 @@ function modoVentaInicial(p: Producto | null): ModoVenta {
 }
 
 export default function FormularioProducto({ producto, categorias, onCerrar, onGuardado, prellenado }: Props) {
-  const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
+  const { tema: T, prefs } = useTema();
   const estiloInput = useEstiloInput();
   const esEdicion = !!producto;
 
@@ -117,6 +124,8 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [imagenUri, setImagenUri] = useState<string | null>(producto?.imagen_uri ?? null);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
+  // Confirmación de borrado sin Alert nativo — igual que en ModalDepartamentos.
+  const [confirmandoBorrado, setConfirmandoBorrado] = useState(false);
 
   // Escáner de código (modo único) y aviso discreto del nombre universal.
   const [escanerAbierto, setEscanerAbierto] = useState(false);
@@ -128,7 +137,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [hayRecorte, setHayRecorte] = useState(false);
   // ¿La foto actual vino del catálogo abierto? Sirve para el aviso de
   // calidad (cerrable) y para saber si dejar de mostrarlo al cambiar de foto.
-  const [fotoEsSugerida, setFotoEsSugerida] = useState(false);
   const [avisoFotoVisible, setAvisoFotoVisible] = useState(false);
   // Vista grande al mantener pulsada la foto (con el formulario difuminado
   // detrás) + acciones rápidas (cámara/galería/quitar fondo/ajustar) sin cerrarla.
@@ -273,7 +281,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
       // que el tendero encuadre a su gusto (el picker ya no recorta solo).
       setAjusteUri(tmp);
       setAjusteEsNuevo(true);
-      setFotoEsSugerida(false);
       setAvisoFotoVisible(false);
       setAjustarAbierto(true);
     } catch (e: any) {
@@ -284,7 +291,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   async function quitarFoto() {
     await borrarImagen(imagenUri);
     setImagenUri(null);
-    setFotoEsSugerida(false);
     setAvisoFotoVisible(false);
   }
 
@@ -340,10 +346,9 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
       setFotoSugerida(null);
       setAjusteUri(local);
       setAjusteEsNuevo(true);
-      setFotoEsSugerida(true);
       setAvisoFotoVisible(true);
       setAjustarAbierto(true);
-    } catch (e: any) {
+    } catch {
       setError("No se pudo descargar la foto. Toma una tú.");
     } finally {
       setBuscandoFoto(false);
@@ -414,467 +419,555 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
     }
   }
 
-  function confirmarBorrado() {
+  async function confirmarBorrado() {
     if (!producto) return;
-    Alert.alert(
-      "Eliminar producto",
-      `¿Eliminar "${producto.nombre}"? No aparecerá más en el inventario.`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Eliminar",
-          style: "destructive",
-          onPress: async () => {
-            setGuardando(true);
-            try {
-              await eliminarProducto(producto.id);
-              onGuardado();
-            } catch (e: any) {
-              setError(e?.message ?? String(e));
-              setGuardando(false);
-            }
-          },
-        },
-      ]
-    );
+    setGuardando(true);
+    try {
+      await eliminarProducto(producto.id);
+      onGuardado();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+      setGuardando(false);
+      setConfirmandoBorrado(false);
+    }
   }
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+    <Hoja
+      visible
+      onCerrar={guardando ? () => {} : onCerrar}
+      titulo={esEdicion ? "Editar producto" : "Nuevo producto"}
+      tipo="completa"
+      pie={
+        <Boton
+          titulo={esEdicion ? "Guardar cambios" : "Crear producto"}
+          onPress={guardar}
+          cargando={guardando}
+        />
+      }
+    >
+      <Banner texto={error} tipo="error" />
+
+      {/* Foto del producto — mantener pulsada para verla en grande */}
+      <View style={{ alignItems: "center", marginBottom: T.esps.xl }}>
+        <Pressable onLongPress={abrirLightbox} delayLongPress={280}>
+          <ImagenProducto
+            uri={imagenUri}
+            nombre={nombre || "?"}
+            color={categorias.find((c) => c.id === categoriaId)?.color}
+            icono={categorias.find((c) => c.id === categoriaId)?.icono}
+            size={104}
+            radio={18}
+          />
+        </Pressable>
+        <View style={{ flexDirection: "row", gap: T.esps.lg, marginTop: T.esps.md }}>
+          <BotonFoto icono="camara" label="Cámara" onPress={() => cambiarFoto("camara")} />
+          <BotonFoto icono="imagen" label="Galería" onPress={() => cambiarFoto("galeria")} />
+          {imagenUri ? (
+            <Pressable onPress={quitarFoto} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+              <Txt escala="pie" tono="peligro" fuerte>
+                Quitar
+              </Txt>
+            </Pressable>
+          ) : null}
+        </View>
+      </View>
+
+      {/* ¿Cómo se vende? — mismo criterio que el PC */}
+      <View style={{ marginBottom: T.esps.lg }}>
+        <Segmentado
+          opciones={[
+            { id: "pieza", label: "Pieza" },
+            { id: "granel", label: "A granel" },
+            { id: "kit", label: "Paquete" },
+          ]}
+          valor={modoVenta}
+          onCambio={(v) => setModoVenta(v as ModoVenta)}
+        />
+        <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.sm }}>
+          {modoVenta === "pieza"
+            ? "Se vende por piezas enteras: refrescos, cigarros, dulces."
+            : modoVenta === "granel"
+            ? "Se vende por peso o volumen con decimales, usando báscula: fruta, verdura, carnes."
+            : "Un paquete que agrupa otros productos y descuenta sus componentes del inventario al venderse."}
+        </Txt>
+        {modoVenta === "granel" && (
+          <View style={{ marginTop: T.esps.md }}>
+            <Campo label="Unidad de granel">
+              <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+                <Chip activo={unidadGranel === "kg"} label="Kilogramo" onPress={() => setUnidadGranel("kg")} />
+                <Chip activo={unidadGranel === "litro"} label="Litro" onPress={() => setUnidadGranel("litro")} />
+              </View>
+            </Campo>
+          </View>
+        )}
+      </View>
+
+      {/* Foto que ofrece el catálogo abierto */}
+      {fotoSugerida && !imagenUri && (
+        <Pressable
+          onPress={usarFotoSugerida}
+          disabled={buscandoFoto}
+          style={{
+            backgroundColor: T.acentoSuave,
+            borderWidth: 1,
+            borderColor: T.acento,
+            borderRadius: T.radio,
+            padding: T.esps.md,
+            marginBottom: T.esps.lg,
+          }}
         >
-          <CabeceraModal
-            titulo={esEdicion ? "Editar producto" : "Nuevo producto"}
-            onIzquierda={onCerrar}
-            derecha="Guardar"
-            onDerecha={guardar}
-            derechaCargando={guardando}
+          <Txt escala="pie" tono="acento" fuerte estilo={{ textAlign: "center" }}>
+            {buscandoFoto ? "Descargando…" : "Encontramos una foto de este producto — tócala para usarla"}
+          </Txt>
+        </Pressable>
+      )}
+
+      {/* Aviso de calidad: la foto viene de un catálogo abierto, cerrable */}
+      {avisoFotoVisible && imagenUri && (
+        <View
+          style={{
+            flexDirection: "row",
+            gap: T.esps.md,
+            backgroundColor: T.alertaSuave,
+            borderRadius: T.radio,
+            padding: T.esps.md,
+            marginBottom: T.esps.lg,
+          }}
+        >
+          <Txt escala="pie" tono="alerta" estilo={{ flex: 1 }}>
+            Esta foto viene de un catálogo abierto — la calidad varía según
+            quién la subió. Si no se ve bien, tómala tú o usa "Quitar fondo".
+          </Txt>
+          <Pressable onPress={() => setAvisoFotoVisible(false)} hitSlop={10}>
+            <Txt escala="pie" tono="alerta" fuerte>
+              ✕
+            </Txt>
+          </Pressable>
+        </View>
+      )}
+
+      {/* Quitar fondo: sirve para la foto del catálogo y para la propia */}
+      {imagenUri && hayRecorte && (
+        <Pressable
+          onPress={recortarFondo}
+          disabled={recortando}
+          style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, marginBottom: T.esps.lg }}
+        >
+          <IconoUI id="imagen" size={16} color={T.textoSuave} />
+          <Txt escala="pie" tono="suave">
+            {recortando ? "Quitando fondo…" : "Quitar fondo"}
+          </Txt>
+        </Pressable>
+      )}
+
+      <Campo label="Nombre">
+        <TextInput
+          style={estiloInput}
+          value={nombre}
+          onChangeText={(t) => {
+            setNombre(t);
+            // Ya es texto del tendero: un re-escaneo no lo debe pisar.
+            setNombreEsSugerido(false);
+          }}
+          autoCorrect={false}
+          placeholder={esKit ? "Ej. Six Corona 355ml" : "Ej. Coca-Cola 600ml"}
+          placeholderTextColor={T.textoTenue}
+        />
+      </Campo>
+
+      <Campo label="Código de barras · opcional">
+        <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+          <TextInput
+            style={[estiloInput, { flex: 1 }]}
+            value={codigo}
+            onChangeText={setCodigo}
+            placeholder="Escanea o escribe"
+            placeholderTextColor={T.textoTenue}
+            autoCapitalize="characters"
+            autoCorrect={false}
+          />
+          <Pressable
+            onPress={() => {
+              setAvisoEscaner("");
+              setEscanerAbierto(true);
+            }}
+            hitSlop={6}
+            style={{
+              width: 48,
+              height: 48,
+              borderRadius: T.radioChico,
+              backgroundColor: T.superficie2,
+              alignItems: "center",
+              justifyContent: "center",
+            }}
+          >
+            <IconoUI id="escaner" size={19} color={T.acento} grosor={1.8} />
+          </Pressable>
+        </View>
+        {(buscandoNombre || avisoEscaner) && (
+          <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+            {buscandoNombre ? "Buscando el nombre del producto…" : avisoEscaner}
+          </Txt>
+        )}
+      </Campo>
+
+      <Campo label="Departamento">
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
+          <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+            <Chip activo={categoriaId === null} label="Sin depto." onPress={() => setCategoriaId(null)} />
+            {categorias.map((c) => (
+              <Chip
+                key={c.id}
+                activo={categoriaId === c.id}
+                label={c.nombre}
+                color={c.color ?? undefined}
+                onPress={() => setCategoriaId(c.id)}
+              />
+            ))}
+          </View>
+        </ScrollView>
+      </Campo>
+
+      <FilaSwitch
+        titulo="Favorito ★"
+        meta="Aparece primero en la cuadrícula rápida de Vender."
+        valor={favorito}
+        onCambio={setFavorito}
+      />
+
+      {/* ---------- MODO KIT: armador de componentes ---------- */}
+      {esKit && (
+        <View
+          style={{
+            backgroundColor: T.superficie,
+            borderRadius: T.radio,
+            borderWidth: 1,
+            borderColor: T.bordeFuerte,
+            padding: T.esps.lg,
+            marginBottom: T.esps.lg,
+          }}
+        >
+          <Txt escala="cuerpo" fuerte>
+            Componentes del kit
+          </Txt>
+          <Txt escala="pie" tono="suave" estilo={{ marginTop: 2, marginBottom: T.esps.md }}>
+            Al vender el kit se descuenta el stock de cada componente.
+          </Txt>
+
+          {componentes.map((c) => (
+            <View
+              key={c.producto_id}
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                gap: T.esps.sm,
+                paddingVertical: T.esps.sm,
+                borderBottomWidth: StyleSheet.hairlineWidth,
+                borderBottomColor: T.borde,
+              }}
+            >
+              <View style={{ flex: 1 }}>
+                <Txt escala="pie" fuerte lineas={1}>
+                  {c.nombre}
+                </Txt>
+                <Txt escala="micro" tono="tenue">
+                  stock: {fmtStock(c.stock, "")} · costo {pesos(c.costo_centavos ?? 0)}
+                </Txt>
+              </View>
+              <TextInput
+                style={[estiloInput, { width: 64, textAlign: "center", paddingHorizontal: 4 }]}
+                value={c.cantidad}
+                onChangeText={(t) => cambiarCantidad(c.producto_id, t)}
+                keyboardType="decimal-pad"
+              />
+              <Pressable onPress={() => quitarComponente(c.producto_id)} hitSlop={10}>
+                <Txt escala="cuerpo" tono="peligro" fuerte>
+                  ✕
+                </Txt>
+              </Pressable>
+            </View>
+          ))}
+
+          <TextInput
+            style={[estiloInput, { marginTop: T.esps.sm }]}
+            value={buscaComp}
+            onChangeText={setBuscaComp}
+            placeholder="Buscar producto para añadir…"
+            placeholderTextColor={T.textoTenue}
+          />
+          {resultadosComp.map((p) => (
+            <Pressable
+              key={p.id}
+              onPress={() => agregarComponente(p)}
+              style={{ paddingVertical: T.esps.sm }}
+            >
+              <Txt escala="pie" fuerte>
+                {p.nombre}
+              </Txt>
+              <Txt escala="micro" tono="tenue">
+                {pesos(p.precio_venta_centavos)} · stock {fmtStock(p.stock, p.unidad)}
+              </Txt>
+            </Pressable>
+          ))}
+
+          {componentes.length > 0 && (
+            <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.sm }}>
+              Costo del kit (suma de componentes):{" "}
+              <Monto texto={pesos(Math.round(costoKit))} escala="pie" tono="exito" />
+            </Txt>
+          )}
+        </View>
+      )}
+
+      {/* Precios */}
+      <View style={{ flexDirection: "row", gap: T.esps.md }}>
+        <Campo label="Precio venta" flex>
+          <TextInput
+            style={estiloInput}
+            value={precio}
+            onChangeText={setPrecio}
+            keyboardType="decimal-pad"
+            placeholder="0.00"
+            placeholderTextColor={T.textoTenue}
+          />
+        </Campo>
+        {!esKit && (
+          <Campo label="Costo" flex>
+            <TextInput
+              style={estiloInput}
+              value={costo}
+              onChangeText={setCosto}
+              keyboardType="decimal-pad"
+              placeholder="0.00"
+              placeholderTextColor={T.textoTenue}
+            />
+          </Campo>
+        )}
+      </View>
+
+      {margen != null && (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "space-between",
+            backgroundColor: margen < 0 ? T.peligroSuave : T.exitoSuave,
+            borderRadius: T.radioChico,
+            padding: T.esps.md,
+            marginBottom: T.esps.lg,
+          }}
+        >
+          <Txt escala="pie" tono="suave" fuerte>
+            Margen
+          </Txt>
+          <View style={{ alignItems: "flex-end" }}>
+            <Monto texto={`${margen}%`} escala="cuerpo" tono={margen < 0 ? "peligro" : "exito"} />
+            {margen < 0 ? (
+              <Txt escala="micro" tono="peligro">
+                Estás vendiendo bajo costo
+              </Txt>
+            ) : null}
+          </View>
+        </View>
+      )}
+
+      <Campo label="Precio mayoreo · opcional">
+        <TextInput
+          style={estiloInput}
+          value={mayoreo}
+          onChangeText={setMayoreo}
+          keyboardType="decimal-pad"
+          placeholder="0.00"
+          placeholderTextColor={T.textoTenue}
+        />
+      </Campo>
+
+      {/* Stock (solo producto normal) */}
+      {!esKit && (
+        <>
+          <FilaSwitch
+            titulo="Controlar stock"
+            meta="Apágalo para servicios o venta sin inventario."
+            valor={controlaStock}
+            onCambio={setControlaStock}
           />
 
-          <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
-            <Banner texto={error} tipo="error" />
-
-            {/* Foto del producto — mantener pulsada para verla en grande */}
-            <View style={est.fotoZona}>
-              <Pressable onLongPress={abrirLightbox} delayLongPress={280}>
-                <ImagenProducto
-                  uri={imagenUri}
-                  nombre={nombre || "?"}
-                  color={categorias.find((c) => c.id === categoriaId)?.color}
-                  icono={categorias.find((c) => c.id === categoriaId)?.icono}
-                  size={104}
-                  radio={18}
-                />
-              </Pressable>
-              <View style={est.fotoBotones}>
-                <Pressable style={est.fotoBtn} onPress={() => cambiarFoto("camara")}>
-                  <IconoUI id="camara" size={16} color={T.textoSuave} />
-                  <Text style={est.fotoBtnTxt}>Cámara</Text>
-                </Pressable>
-                <Pressable style={est.fotoBtn} onPress={() => cambiarFoto("galeria")}>
-                  <IconoUI id="imagen" size={16} color={T.textoSuave} />
-                  <Text style={est.fotoBtnTxt}>Galería</Text>
-                </Pressable>
-                {imagenUri && (
-                  <Pressable style={est.fotoBtn} onPress={quitarFoto}>
-                    <Text style={[est.fotoBtnTxt, { color: T.peligro }]}>Quitar</Text>
-                  </Pressable>
-                )}
-              </View>
-            </View>
-
-            {/* ¿Cómo se vende? — mismo criterio que el PC */}
-            <View style={est.tipoFila}>
-              <Segmento
-                opciones={[
-                  { id: "pieza", label: "Pieza" },
-                  { id: "granel", label: "A granel" },
-                  { id: "kit", label: "Paquete" },
-                ]}
-                valor={modoVenta}
-                onCambio={(v) => setModoVenta(v as ModoVenta)}
-              />
-              <Text style={est.modoVentaTip}>
-                {modoVenta === "pieza"
-                  ? "Se vende por piezas enteras: refrescos, cigarros, dulces."
-                  : modoVenta === "granel"
-                  ? "Se vende por peso o volumen con decimales, usando báscula: fruta, verdura, carnes."
-                  : "Un paquete que agrupa otros productos y descuenta sus componentes del inventario al venderse."}
-              </Text>
-              {modoVenta === "granel" && (
-                <View style={{ marginTop: 10 }}>
-                  <Campo label="Unidad de granel">
-                    <View style={est.chips}>
-                      <Chip
-                        activo={unidadGranel === "kg"}
-                        label="Kilogramo"
-                        onPress={() => setUnidadGranel("kg")}
-                      />
-                      <Chip
-                        activo={unidadGranel === "litro"}
-                        label="Litro"
-                        onPress={() => setUnidadGranel("litro")}
-                      />
-                    </View>
-                  </Campo>
-                </View>
-              )}
-            </View>
-
-            {/* Foto que ofrece el catálogo abierto */}
-            {fotoSugerida && !imagenUri && (
-              <Pressable style={est.sugerenciaFoto} onPress={usarFotoSugerida} disabled={buscandoFoto}>
-                <Text style={est.sugerenciaFotoTxt}>
-                  {buscandoFoto ? "Descargando…" : "Encontramos una foto de este producto — tócala para usarla"}
-                </Text>
-              </Pressable>
-            )}
-
-            {/* Aviso de calidad: la foto viene de un catálogo abierto, cerrable */}
-            {avisoFotoVisible && imagenUri && (
-              <View style={est.avisoFoto}>
-                <Text style={est.avisoFotoTxt}>
-                  Esta foto viene de un catálogo abierto — la calidad varía
-                  según quién la subió. Si no se ve bien, tómala tú o usa
-                  "Quitar fondo".
-                </Text>
-                <Pressable
-                  onPress={() => setAvisoFotoVisible(false)}
-                  hitSlop={10}
-                  style={est.avisoFotoCerrar}
-                >
-                  <Text style={est.avisoFotoCerrarTxt}>✕</Text>
-                </Pressable>
-              </View>
-            )}
-
-            {/* Quitar fondo: sirve para la foto del catálogo y para la propia */}
-            {imagenUri && hayRecorte && (
-              <Pressable style={est.fotoBtn} onPress={recortarFondo} disabled={recortando}>
-                <IconoUI id="imagen" size={16} color={T.textoSuave} />
-                <Text style={est.fotoBtnTxt}>{recortando ? "Quitando fondo…" : "Quitar fondo"}</Text>
-              </Pressable>
-            )}
-
-            <Campo label="Nombre">
-              <TextInput
-                style={estiloInput}
-                value={nombre}
-                onChangeText={(t) => {
-                  setNombre(t);
-                  // Ya es texto del tendero: un re-escaneo no lo debe pisar.
-                  setNombreEsSugerido(false);
-                }}
-                placeholder={esKit ? "Ej. Six Corona 355ml" : "Ej. Coca-Cola 600ml"}
-                placeholderTextColor={T.textoTenue}
-              />
-            </Campo>
-
-            <Campo label="Código de barras · opcional">
-              <View style={est.codigoFila}>
-                <TextInput
-                  style={[estiloInput, { flex: 1 }]}
-                  value={codigo}
-                  onChangeText={setCodigo}
-                  placeholder="Escanea o escribe"
-                  placeholderTextColor={T.textoTenue}
-                  autoCapitalize="characters"
-                />
-                <Pressable
-                  style={est.scanBtn}
-                  onPress={() => {
-                    setAvisoEscaner("");
-                    setEscanerAbierto(true);
-                  }}
-                  hitSlop={6}
-                >
-                  <IconoUI id="escaner" size={19} color={T.acento} grosor={1.8} />
-                </Pressable>
-              </View>
-              {(buscandoNombre || avisoEscaner) && (
-                <Text style={est.avisoEscaner}>
-                  {buscandoNombre ? "Buscando el nombre del producto…" : avisoEscaner}
-                </Text>
-              )}
-            </Campo>
-
-            <Campo label="Departamento">
-              <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ flexGrow: 0 }}>
-                <View style={est.chips}>
-                  <Chip activo={categoriaId === null} label="Sin depto." onPress={() => setCategoriaId(null)} />
-                  {categorias.map((c) => (
-                    <Chip
-                      key={c.id}
-                      activo={categoriaId === c.id}
-                      label={c.nombre}
-                      color={c.color ?? undefined}
-                      onPress={() => setCategoriaId(c.id)}
-                    />
-                  ))}
-                </View>
-              </ScrollView>
-            </Campo>
-
-            <View style={est.switchFila}>
-              <View style={{ flex: 1 }}>
-                <Text style={est.switchLbl}>Favorito ★</Text>
-                <Text style={est.switchAyuda}>
-                  Aparece primero en la cuadrícula rápida de Vender.
-                </Text>
-              </View>
-              <Switch
-                value={favorito}
-                onValueChange={setFavorito}
-                trackColor={{ true: T.acento, false: T.borde }}
-                thumbColor="#fff"
-              />
-            </View>
-
-            {/* ---------- MODO KIT: armador de componentes ---------- */}
-            {esKit && (
-              <View style={est.kitCaja}>
-                <Text style={est.kitTitulo}>Componentes del kit</Text>
-                <Text style={est.kitAyuda}>
-                  Al vender el kit se descuenta el stock de cada componente.
-                </Text>
-
-                {componentes.map((c) => (
-                  <View key={c.producto_id} style={est.compFila}>
-                    <View style={{ flex: 1 }}>
-                      <Text style={est.compNombre} numberOfLines={1}>{c.nombre}</Text>
-                      <Text style={est.compMeta}>
-                        stock: {fmtStock(c.stock, "")} · costo {pesos(c.costo_centavos ?? 0)}
-                      </Text>
-                    </View>
-                    <TextInput
-                      style={est.compCant}
-                      value={c.cantidad}
-                      onChangeText={(t) => cambiarCantidad(c.producto_id, t)}
-                      keyboardType="decimal-pad"
-                    />
-                    <Pressable onPress={() => quitarComponente(c.producto_id)} hitSlop={10}>
-                      <Text style={est.compQuitar}>✕</Text>
-                    </Pressable>
-                  </View>
-                ))}
-
-                <TextInput
-                  style={[estiloInput, { marginTop: 8 }]}
-                  value={buscaComp}
-                  onChangeText={setBuscaComp}
-                  placeholder="Buscar producto para añadir…"
-                  placeholderTextColor={T.textoTenue}
-                />
-                {resultadosComp.map((p) => (
-                  <Pressable key={p.id} style={est.compResultado} onPress={() => agregarComponente(p)}>
-                    <Text style={est.compResNombre}>{p.nombre}</Text>
-                    <Text style={est.compResMeta}>
-                      {pesos(p.precio_venta_centavos)} · stock {fmtStock(p.stock, p.unidad)}
-                    </Text>
-                  </Pressable>
-                ))}
-
-                {componentes.length > 0 && (
-                  <Text style={est.kitCosto}>
-                    Costo del kit (suma de componentes):{" "}
-                    <Text style={{ color: T.turquesa, fontWeight: "800" }}>{pesos(Math.round(costoKit))}</Text>
-                  </Text>
-                )}
-              </View>
-            )}
-
-            {/* Precios */}
-            <View style={est.fila}>
-              <Campo label="Precio venta" flex>
+          {controlaStock && (
+            <View style={{ flexDirection: "row", gap: T.esps.md }}>
+              <Campo label="Stock actual" flex>
                 <TextInput
                   style={estiloInput}
-                  value={precio}
-                  onChangeText={setPrecio}
+                  value={stock}
+                  onChangeText={setStock}
                   keyboardType="decimal-pad"
-                  placeholder="0.00"
                   placeholderTextColor={T.textoTenue}
                 />
               </Campo>
-              {!esKit && (
-                <Campo label="Costo" flex>
-                  <TextInput
-                    style={estiloInput}
-                    value={costo}
-                    onChangeText={setCosto}
-                    keyboardType="decimal-pad"
-                    placeholder="0.00"
-                    placeholderTextColor={T.textoTenue}
-                  />
-                </Campo>
-              )}
+              <Campo label="Stock mínimo" flex>
+                <TextInput
+                  style={estiloInput}
+                  value={stockMin}
+                  onChangeText={setStockMin}
+                  keyboardType="decimal-pad"
+                  placeholderTextColor={T.textoTenue}
+                />
+              </Campo>
             </View>
+          )}
+        </>
+      )}
 
-            {margen != null && (
-              <View style={est.margenCaja}>
-                <Text style={est.margenLbl}>Margen</Text>
-                <Text style={[est.margenVal, { color: margen < 0 ? T.peligro : T.turquesa }]}>
-                  {margen}%
-                </Text>
-                {margen < 0 && <Text style={est.margenAviso}>Estás vendiendo bajo costo</Text>}
-              </View>
-            )}
+      {esEdicion && (
+        <View style={{ marginTop: T.esps.md }}>
+          <Boton titulo="Eliminar producto" tipo="peligro" onPress={() => setConfirmandoBorrado(true)} />
+        </View>
+      )}
 
-            <Campo label="Precio mayoreo · opcional">
-              <TextInput
-                style={estiloInput}
-                value={mayoreo}
-                onChangeText={setMayoreo}
-                keyboardType="decimal-pad"
-                placeholder="0.00"
-                placeholderTextColor={T.textoTenue}
-              />
-            </Campo>
+      {/* Confirmación de borrado: hoja chica, sin Alert nativo. */}
+      <Hoja
+        visible={confirmandoBorrado}
+        onCerrar={() => setConfirmandoBorrado(false)}
+        titulo="Eliminar producto"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Eliminar" tipo="peligro" onPress={confirmarBorrado} cargando={guardando} />
+            <Boton titulo="Cancelar" tipo="secundario" onPress={() => setConfirmandoBorrado(false)} />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {producto ? `¿Eliminar "${producto.nombre}"? No aparecerá más en el inventario.` : ""}
+        </Txt>
+      </Hoja>
 
-            {/* Stock (solo producto normal) */}
-            {!esKit && (
-              <>
-                <View style={est.switchFila}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={est.switchLbl}>Controlar stock</Text>
-                    <Text style={est.switchAyuda}>
-                      Apágalo para servicios o venta sin inventario.
-                    </Text>
-                  </View>
-                  <Switch
-                    value={controlaStock}
-                    onValueChange={setControlaStock}
-                    trackColor={{ true: T.acento, false: T.borde }}
-                    thumbColor="#fff"
-                  />
-                </View>
+      {/* Escáner de código de barras (modo único: rellena el campo y cierra) */}
+      {escanerAbierto && (
+        <EscanerCamara
+          modo="unico"
+          onCodigo={(c) => void alEscanearCodigo(c)}
+          onCerrar={() => setEscanerAbierto(false)}
+        />
+      )}
 
-                {controlaStock && (
-                  <View style={est.fila}>
-                    <Campo label="Stock actual" flex>
-                      <TextInput
-                        style={estiloInput}
-                        value={stock}
-                        onChangeText={setStock}
-                        keyboardType="decimal-pad"
-                        placeholderTextColor={T.textoTenue}
-                      />
-                    </Campo>
-                    <Campo label="Stock mínimo" flex>
-                      <TextInput
-                        style={estiloInput}
-                        value={stockMin}
-                        onChangeText={setStockMin}
-                        keyboardType="decimal-pad"
-                        placeholderTextColor={T.textoTenue}
-                      />
-                    </Campo>
-                  </View>
-                )}
-              </>
-            )}
-
-            {esEdicion && (
-              <View style={{ marginTop: 12 }}>
-                <Boton titulo="Eliminar producto" tipo="peligro" onPress={confirmarBorrado} />
-              </View>
-            )}
-            <View style={{ height: 40 }} />
-          </ScrollView>
-        </KeyboardAvoidingView>
-
-        {/* Escáner de código de barras (modo único: rellena el campo y cierra) */}
-        {escanerAbierto && (
-          <EscanerCamara
-            modo="unico"
-            onCodigo={(c) => void alEscanearCodigo(c)}
-            onCerrar={() => setEscanerAbierto(false)}
-          />
-        )}
-
-        {/* Vista grande de la foto (mantener pulsada): el formulario queda
-            difuminado detrás. Desde aquí también se puede cambiar o
-            recortar el fondo sin tener que cerrarla primero.
-            NOTA: es un overlay absoluto, no un <Modal> anidado — un Modal
-            dentro de otro Modal no siempre cubre toda la pantalla. */}
-        {lightboxAbierto && imagenUri && (
-          <View style={est.lightboxOverlayRoot}>
+      {/* Vista grande de la foto (mantener pulsada): el formulario queda
+          difuminado detrás. Desde aquí también se puede cambiar o recortar
+          el fondo sin tener que cerrarla primero.
+          Overlay absoluto, NO un <Modal> anidado — un Modal dentro de otro
+          Modal no siempre cubre toda la pantalla en React Native. */}
+      {lightboxAbierto && imagenUri && (
+        <View style={estLightbox.raiz}>
+          {/* Modo Rendimiento: el desenfoque con GPU es lo único pesado de
+              toda esta pantalla — en un dispositivo de gama baja se siente
+              con lag. Apagado, se compensa oscureciendo más fuerte en vez
+              de dejar la foto de fondo asomando sin difuminar. */}
+          {!prefs.modoRendimiento && (
             <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-            <View style={[StyleSheet.absoluteFill, est.lightboxOscurecer]} />
-            <Pressable
-              style={StyleSheet.absoluteFill}
-              onPress={() => setLightboxAbierto(false)}
-            />
-            <View style={est.lightboxImagenWrap} pointerEvents="box-none">
-              <Image
-                source={{ uri: imagenUri }}
-                style={est.lightboxImagen}
-                resizeMode="contain"
-              />
-            </View>
-            <View style={est.lightboxAcciones}>
-              <Pressable
-                style={est.lightboxBtn}
-                onPress={() => accionDesdeLightbox(() => void abrirAjustarActual())}
-              >
-                <IconoUI id="imagen" size={17} color="#fff" />
-                <Text style={est.lightboxBtnTxt}>Ajustar</Text>
-              </Pressable>
-              <Pressable
-                style={est.lightboxBtn}
-                onPress={() => accionDesdeLightbox(() => cambiarFoto("camara"))}
-              >
-                <IconoUI id="camara" size={17} color="#fff" />
-                <Text style={est.lightboxBtnTxt}>Cámara</Text>
-              </Pressable>
-              <Pressable
-                style={est.lightboxBtn}
-                onPress={() => accionDesdeLightbox(() => cambiarFoto("galeria"))}
-              >
-                <IconoUI id="imagen" size={17} color="#fff" />
-                <Text style={est.lightboxBtnTxt}>Galería</Text>
-              </Pressable>
-              {hayRecorte && (
-                <Pressable
-                  style={est.lightboxBtn}
-                  onPress={() => accionDesdeLightbox(() => void recortarFondo())}
-                >
-                  <IconoUI id="imagen" size={17} color="#fff" />
-                  <Text style={est.lightboxBtnTxt}>Quitar fondo</Text>
-                </Pressable>
-              )}
-            </View>
-            <Pressable
-              style={est.lightboxCerrar}
-              onPress={() => setLightboxAbierto(false)}
-              hitSlop={10}
-            >
-              <Text style={est.lightboxCerrarTxt}>✕</Text>
-            </Pressable>
+          )}
+          <View
+            style={[
+              StyleSheet.absoluteFill,
+              estLightbox.oscurecer,
+              prefs.modoRendimiento && { backgroundColor: "rgba(0,0,0,0.75)" },
+            ]}
+          />
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setLightboxAbierto(false)} />
+          <View style={estLightbox.imagenWrap} pointerEvents="box-none">
+            <Image source={{ uri: imagenUri }} style={estLightbox.imagen} resizeMode="contain" />
           </View>
-        )}
+          <View style={estLightbox.acciones}>
+            <BotonLightbox icono="imagen" label="Ajustar" onPress={() => accionDesdeLightbox(() => void abrirAjustarActual())} />
+            <BotonLightbox icono="camara" label="Cámara" onPress={() => accionDesdeLightbox(() => cambiarFoto("camara"))} />
+            <BotonLightbox icono="imagen" label="Galería" onPress={() => accionDesdeLightbox(() => cambiarFoto("galeria"))} />
+            {hayRecorte && (
+              <BotonLightbox icono="imagen" label="Quitar fondo" onPress={() => accionDesdeLightbox(() => void recortarFondo())} />
+            )}
+          </View>
+          <Pressable style={estLightbox.cerrar} onPress={() => setLightboxAbierto(false)} hitSlop={10}>
+            <Text style={estLightbox.cerrarTxt}>✕</Text>
+          </Pressable>
+        </View>
+      )}
 
-        {/* Recortador con pellizco/arrastre: mismo patrón de overlay
-            absoluto que el lightbox (no un <Modal> anidado). */}
-        {ajustarAbierto && ajusteUri && (
-          <View style={est.lightboxOverlayRoot}>
-            <RecortadorFoto
-              uri={ajusteUri}
-              onCancelar={cancelarAjuste}
-              onListo={(u, orig) => void alConfirmarRecorte(u, orig)}
-            />
-          </View>
-        )}
-      </SafeAreaView>
-    </Modal>
+      {/* Recortador con pellizco/arrastre: mismo patrón de overlay absoluto
+          que el lightbox (no un <Modal> anidado). */}
+      {ajustarAbierto && ajusteUri && (
+        <View style={estLightbox.raiz}>
+          <RecortadorFoto
+            uri={ajusteUri}
+            onCancelar={cancelarAjuste}
+            onListo={(u, orig) => void alConfirmarRecorte(u, orig)}
+          />
+        </View>
+      )}
+    </Hoja>
   );
 }
 
-// --- Piezas locales ---
+// ---------------------------------------------------------------------------
+// Piezas locales
+// ---------------------------------------------------------------------------
 
-function Segmento({
+function BotonFoto({
+  icono,
+  label,
+  onPress,
+}: {
+  icono: IdUI;
+  label: string;
+  onPress: () => void;
+}) {
+  const { tema: T } = useTema();
+  return (
+    <Pressable onPress={onPress} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+      <IconoUI id={icono} size={16} color={T.textoSuave} />
+      <Txt escala="pie" tono="suave">
+        {label}
+      </Txt>
+    </Pressable>
+  );
+}
+
+function FilaSwitch({
+  titulo,
+  meta,
+  valor,
+  onCambio,
+}: {
+  titulo: string;
+  meta: string;
+  valor: boolean;
+  onCambio: (v: boolean) => void;
+}) {
+  const { tema: T } = useTema();
+  return (
+    <View
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: T.esps.md,
+        marginBottom: T.esps.lg,
+      }}
+    >
+      <View style={{ flex: 1 }}>
+        <Txt escala="cuerpo" fuerte>
+          {titulo}
+        </Txt>
+        <Txt escala="micro" tono="tenue" estilo={{ marginTop: 2 }}>
+          {meta}
+        </Txt>
+      </View>
+      <Switch
+        value={valor}
+        onValueChange={onCambio}
+        trackColor={{ false: T.superficie3, true: T.acentoBorde }}
+        thumbColor={valor ? T.acento : T.textoTenue}
+      />
+    </View>
+  );
+}
+
+function Segmentado({
   opciones,
   valor,
   onCambio,
@@ -884,18 +977,41 @@ function Segmento({
   onCambio: (v: string) => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   return (
-    <View style={est.segmento}>
-      {opciones.map((o) => (
-        <Pressable
-          key={o.id}
-          onPress={() => onCambio(o.id)}
-          style={[est.segBtn, valor === o.id && est.segActivo]}
-        >
-          <Text style={[est.segTxt, valor === o.id && est.segTxtActivo]}>{o.label}</Text>
-        </Pressable>
-      ))}
+    <View
+      style={{
+        flexDirection: "row",
+        backgroundColor: T.superficie2,
+        borderRadius: T.radio,
+        padding: 3,
+      }}
+    >
+      {opciones.map((o) => {
+        const activo = valor === o.id;
+        return (
+          <Pressable
+            key={o.id}
+            onPress={() => onCambio(o.id)}
+            style={{
+              flex: 1,
+              minHeight: 40,
+              alignItems: "center",
+              justifyContent: "center",
+              borderRadius: T.radioChico,
+              backgroundColor: activo ? T.acentoRelleno : "transparent",
+            }}
+          >
+            <Txt
+              escala="pie"
+              fuerte={activo}
+              tono="suave"
+              estilo={activo ? { color: T.acentoTexto } : undefined}
+            >
+              {o.label}
+            </Txt>
+          </Pressable>
+        );
+      })}
     </View>
   );
 }
@@ -912,239 +1028,102 @@ function Chip({
   onPress: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
+  // Con color de departamento, el texto siempre es blanco (igual que ya
+  // hacía el original). SIN color propio, el chip usa el acento del tema
+  // — y ahí el texto tiene que ser T.acentoTexto, no blanco fijo: con el
+  // acento "Perla" el texto correcto es oscuro, blanco sería ilegible.
+  const usaColorPropio = activo && !!color;
+  const fondo = activo ? (color ?? T.acentoRelleno) : T.superficie2;
+  const colorTexto = usaColorPropio ? "#ffffff" : activo ? T.acentoTexto : undefined;
   return (
     <Pressable
       onPress={onPress}
-      style={[
-        est.chip,
-        activo && { backgroundColor: color ?? T.acento, borderColor: color ?? T.acento },
-      ]}
+      style={{
+        paddingHorizontal: T.esps.md,
+        paddingVertical: T.esps.sm,
+        borderRadius: T.radioPildora,
+        borderWidth: 1,
+        borderColor: activo ? fondo : T.borde,
+        backgroundColor: fondo,
+      }}
     >
-      <Text style={[est.chipTxt, activo && { color: color ? "#fff" : T.acentoTexto, fontWeight: "700" }]}>{label}</Text>
+      <Txt
+        escala="pie"
+        tono={activo ? "principal" : "suave"}
+        fuerte={activo}
+        estilo={colorTexto ? { color: colorTexto } : undefined}
+      >
+        {label}
+      </Txt>
     </Pressable>
   );
 }
 
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp, paddingBottom: 60 },
-    fila: { flexDirection: "row", gap: 12 },
-    tipoFila: { marginBottom: 18 },
-    segmento: {
-      flexDirection: "row",
-      backgroundColor: T.superficie,
-      borderRadius: T.radioChico + 2,
-      borderWidth: 1,
-      borderColor: T.borde,
-      padding: 4,
-    },
-    segBtn: { flex: 1, paddingVertical: 10, borderRadius: T.radioChico - 2, alignItems: "center" },
-    segActivo: { backgroundColor: T.acento },
-    segTxt: { color: T.textoSuave, fontSize: 14, fontWeight: "600" },
-    segTxtActivo: { color: T.acentoTexto, fontWeight: "800" },
-    chips: { flexDirection: "row", gap: 8, paddingVertical: 2 },
-    chip: {
-      paddingHorizontal: 14,
-      paddingVertical: 8,
-      borderRadius: 20,
-      borderWidth: 1,
-      borderColor: T.borde,
-      backgroundColor: T.superficie2,
-    },
-    chipTxt: { color: T.textoSuave, fontSize: 14 },
-    switchFila: { flexDirection: "row", alignItems: "center", marginBottom: 18, gap: 12 },
-    switchLbl: { color: T.texto, fontSize: 15, fontWeight: "700" },
-    switchAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 2, paddingRight: 12 },
-    margenCaja: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      backgroundColor: T.superficie,
-      borderRadius: T.radioChico,
-      borderWidth: 1,
-      borderColor: T.borde,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-      marginTop: -6,
-      marginBottom: 16,
-    },
-    margenLbl: { color: T.textoSuave, fontSize: 13, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.5 },
-    margenVal: { fontSize: 18, fontWeight: "800" },
-    margenAviso: { color: T.peligro, fontSize: 12, flex: 1, textAlign: "right" },
-    kitCaja: {
-      backgroundColor: T.superficie,
-      borderRadius: T.radio,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      padding: 14,
-      marginBottom: 18,
-    },
-    kitTitulo: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    kitAyuda: { color: T.textoTenue, fontSize: 12, marginTop: 3, marginBottom: 10 },
-    compFila: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      paddingVertical: 9,
-      borderBottomWidth: 1,
-      borderBottomColor: T.borde,
-    },
-    compNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
-    compMeta: { color: T.textoTenue, fontSize: 11, marginTop: 1 },
-    compCant: {
-      backgroundColor: T.superficie2,
-      borderRadius: 8,
-      borderWidth: 1,
-      borderColor: T.borde,
-      color: T.texto,
-      width: 62,
-      textAlign: "center",
-      paddingVertical: 7,
-      fontSize: 15,
-    },
-    compQuitar: { color: T.peligro, fontSize: 16, fontWeight: "800", paddingHorizontal: 4 },
-    compResultado: {
-      backgroundColor: T.superficie2,
-      borderRadius: T.radioChico,
-      borderWidth: 1,
-      borderColor: T.borde,
-      padding: 11,
-      marginTop: 6,
-    },
-    compResNombre: { color: T.texto, fontSize: 14, fontWeight: "600" },
-    compResMeta: { color: T.textoTenue, fontSize: 12, marginTop: 1 },
-    kitCosto: { color: T.textoSuave, fontSize: 13, marginTop: 12 },
-    fotoZona: { flexDirection: "row", alignItems: "center", gap: 14, marginBottom: 20 },
-    fotoBotones: { flex: 1, gap: 8 },
-    fotoBtn: {
-      flexDirection: "row",
-      gap: 7,
-      backgroundColor: T.superficie2,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      borderRadius: T.radioChico,
-      paddingVertical: 9,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    fotoBtnTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
-    codigoFila: { flexDirection: "row", alignItems: "center", gap: 9 },
-    scanBtn: {
-      width: 46,
-      height: 46,
-      borderRadius: T.radioChico + 2,
-      borderWidth: 1,
-      borderColor: T.bordeFuerte,
-      backgroundColor: T.superficie2,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    avisoEscaner: { color: T.textoTenue, fontSize: 12, marginTop: 6, lineHeight: 17 },
-    
-    // Nuevos estilos para la foto sugerida y quitar fondo
-    sugerenciaFoto: {
-      marginTop: 10,
-      padding: 11,
-      borderRadius: T.radio,
-      backgroundColor: T.acento + "14",
-      borderWidth: 1,
-      borderColor: T.acento + "55",
-    },
-    sugerenciaFotoTxt: {
-      color: T.acento,
-      fontSize: 12.5,
-      fontWeight: "600",
-      textAlign: "center",
-    },
-
-    // "¿Cómo se vende?" — texto de ayuda bajo el selector.
-    modoVentaTip: {
-      color: T.textoTenue,
-      fontSize: 12,
-      marginTop: 8,
-      lineHeight: 17,
-    },
-
-    // Aviso de calidad de la foto del catálogo abierto (cerrable, discreto).
-    avisoFoto: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 10,
-      marginTop: 10,
-      padding: 11,
-      borderRadius: T.radio,
-      backgroundColor: T.superficie2,
-      borderWidth: 1,
-      borderColor: T.borde,
-    },
-    avisoFotoTxt: {
-      flex: 1,
-      color: T.textoSuave,
-      fontSize: 12,
-      lineHeight: 17,
-    },
-    avisoFotoCerrar: {
-      width: 24,
-      height: 24,
-      borderRadius: 12,
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    avisoFotoCerrarTxt: { color: T.textoTenue, fontSize: 14, fontWeight: "700" },
-
-    // Lightbox de la foto (mantener pulsada): overlay absoluto de pantalla
-    // completa (NO un <Modal> anidado — ver nota en el JSX) con BlurView
-    // real detrás + un oscurecido sutil encima para contraste de texto.
-    lightboxOverlayRoot: {
-      position: "absolute",
-      top: 0,
-      left: 0,
-      right: 0,
-      bottom: 0,
-      alignItems: "center",
-      justifyContent: "center",
-      zIndex: 50,
-      elevation: 50,
-    },
-    lightboxOscurecer: { backgroundColor: "#00000026" },
-    lightboxImagenWrap: {
-      width: "86%",
-      height: "58%",
-    },
-    lightboxImagen: { width: "100%", height: "100%" },
-    lightboxAcciones: {
-      flexDirection: "row",
-      flexWrap: "wrap",
-      justifyContent: "center",
-      gap: 10,
-      marginTop: 26,
-      paddingHorizontal: 20,
-    },
-    lightboxBtn: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 7,
-      backgroundColor: "#ffffff26",
-      borderWidth: 1,
-      borderColor: "#ffffff44",
-      borderRadius: T.radioChico + 2,
-      paddingHorizontal: 14,
-      paddingVertical: 10,
-    },
-    lightboxBtnTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
-    lightboxCerrar: {
-      position: "absolute",
-      top: 54,
-      right: 22,
-      width: 36,
-      height: 36,
-      borderRadius: 18,
-      backgroundColor: "#ffffff26",
-      alignItems: "center",
-      justifyContent: "center",
-    },
-    lightboxCerrarTxt: { color: "#fff", fontSize: 16, fontWeight: "800" },
-  });
+function BotonLightbox({
+  icono,
+  label,
+  onPress,
+}: {
+  icono: IdUI;
+  label: string;
+  onPress: () => void;
+}) {
+  return (
+    <Pressable onPress={onPress} style={estLightbox.btn}>
+      <IconoUI id={icono} size={17} color="#fff" />
+      <Text style={estLightbox.btnTxt}>{label}</Text>
+    </Pressable>
+  );
 }
+
+// El lightbox y el recortador viven SIEMPRE sobre fondo oscuro (la foto es
+// la protagonista, igual que EscanerCamara): estilos fijos, no dependen del
+// tema activo — a propósito, igual que se documentó en EscanerCamara.tsx.
+const estLightbox = StyleSheet.create({
+  raiz: { ...StyleSheet.absoluteFill, zIndex: 50 },
+  oscurecer: { backgroundColor: "rgba(0,0,0,0.35)" },
+  imagenWrap: {
+    position: "absolute",
+    top: 90,
+    left: 20,
+    right: 20,
+    bottom: 140,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  imagen: { width: "100%", height: "100%" },
+  acciones: {
+    position: "absolute",
+    left: 20,
+    right: 20,
+    bottom: 40,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 10,
+    justifyContent: "center",
+  },
+  btn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 7,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(255,255,255,0.3)",
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+  },
+  btnTxt: { color: "#fff", fontSize: 13, fontWeight: "700" },
+  cerrar: {
+    position: "absolute",
+    top: 50,
+    right: 20,
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: "rgba(255,255,255,0.14)",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  cerrarTxt: { color: "#fff", fontSize: 16, fontWeight: "800" },
+});

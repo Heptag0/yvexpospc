@@ -6,22 +6,16 @@
 //
 // Muestra el saldo actual del cliente y cuántos puntos ganaría con esta
 // compra, para que el canje se decida con información, no de memoria.
+//
+// Migrado a <Hoja>: antes construía su propio Modal + SafeAreaView +
+// KeyboardAvoidingView + CabeceraModal a mano. <Hoja tipo="completa"> ya
+// resuelve exactamente eso. La lista de clientes pasa de un estilo de fila
+// propio a <Fila>, y T.turquesa (la flecha "→") se convierte en T.acento.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  Pressable,
-  StyleSheet,
-  Modal,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { useCallback, useEffect, useState } from "react";
+import { View, TextInput, Pressable } from "react-native";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, useEstiloInput } from "@/src/componentes/ui";
+import { Boton, Banner, Hoja, Grupo, Fila, Txt, Vacio, useEstiloInput } from "@/src/componentes/ui";
 import { IconoUI } from "@/src/componentes/iconos";
 import EscanerCamara from "@/src/componentes/EscanerCamara";
 import {
@@ -34,8 +28,6 @@ import {
 } from "@/src/base/lealtad";
 import { puntosPorCompra } from "@/src/base/lealtadReglas";
 
-type Tema = ReturnType<typeof useTema>["tema"];
-
 export default function ModalClienteVenta({
   totalCentavos,
   onElegir,
@@ -47,7 +39,6 @@ export default function ModalClienteVenta({
   onCerrar: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
 
   const [clientes, setClientes] = useState<Cliente[]>([]);
@@ -100,155 +91,125 @@ export default function ModalClienteVenta({
   }
 
   const ganaria = puntosPorCompra(totalCentavos, pesosPorPunto);
+  const correoInvalido = altaCorreo.trim() !== "" && !correoValido(altaCorreo);
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <CabeceraModal titulo="Cliente del ticket" onIzquierda={onCerrar} />
-          <View style={{ padding: T.esp, flex: 1 }}>
-            <Banner texto={aviso} tipo="info" />
+    <Hoja visible onCerrar={onCerrar} titulo="Cliente del ticket" tipo="completa">
+      <Banner texto={aviso} tipo="info" />
 
-            {/* Escanear QR del cliente */}
-            <Pressable
-              style={({ pressed }) => [est.qrBtn, pressed && { opacity: 0.85 }]}
-              onPress={() => setEscanerAbierto(true)}
-            >
-              <IconoUI id="qr" size={20} color={T.acento} />
-              <Text style={est.qrBtnTxt}>Escanear QR del cliente</Text>
-            </Pressable>
+      {/* Escanear QR del cliente */}
+      <Pressable
+        onPress={() => setEscanerAbierto(true)}
+        android_ripple={{ color: T.acentoBorde }}
+        style={({ pressed }) => ({
+          flexDirection: "row",
+          alignItems: "center",
+          justifyContent: "center",
+          gap: T.esps.sm,
+          backgroundColor: T.acentoSuave,
+          borderWidth: 1.5,
+          borderColor: T.acento,
+          borderRadius: T.radio,
+          minHeight: 52,
+          marginBottom: T.esps.lg,
+          opacity: pressed ? 0.85 : 1,
+        })}
+      >
+        <IconoUI id="qr" size={20} color={T.acento} />
+        <Txt escala="cuerpo" tono="acento" fuerte>
+          Escanear QR del cliente
+        </Txt>
+      </Pressable>
 
-            {/* Buscador */}
-            <TextInput
-              style={[estiloInput, { marginBottom: 12 }]}
-              placeholder="Busca por nombre, teléfono, correo o código…"
-              placeholderTextColor={T.textoTenue}
-              value={busqueda}
-              onChangeText={setBusqueda}
+      {/* Buscador */}
+      <TextInput
+        style={[estiloInput, { marginBottom: T.esps.md }]}
+        placeholder="Busca por nombre, teléfono, correo o código…"
+        placeholderTextColor={T.textoTenue}
+        value={busqueda}
+        onChangeText={setBusqueda}
+      />
+
+      {clientes.length === 0 ? (
+        <Vacio
+          titulo={busqueda ? "Nadie coincide" : "Aún no tienes clientes"}
+          texto={
+            busqueda
+              ? "Puedes darlo de alta aquí abajo."
+              : "Se registran solos la primera vez que ligas uno a una venta."
+          }
+        />
+      ) : (
+        <Grupo>
+          {clientes.map((c) => (
+            <Fila
+              key={c.id}
+              titulo={c.nombre}
+              meta={`Tiene ${c.puntos} pts${ganaria > 0 ? ` · con esta compra ganaría ~${ganaria} más` : ""}`}
+              onPress={() => onElegir(c)}
             />
+          ))}
+        </Grupo>
+      )}
 
-            <FlatList
-              data={clientes}
-              keyExtractor={(c) => c.id}
-              style={{ flex: 1 }}
-              ListEmptyComponent={
-                <Text style={est.vacio}>
-                  {busqueda
-                    ? "Nadie coincide. Puedes darlo de alta aquí abajo."
-                    : "Aún no tienes clientes registrados."}
-                </Text>
-              }
-              renderItem={({ item }) => (
-                <Pressable
-                  style={({ pressed }) => [
-                    est.filaCliente,
-                    pressed && { backgroundColor: T.superficie3 },
-                  ]}
-                  onPress={() => onElegir(item)}
-                >
-                  <View style={{ flex: 1 }}>
-                    <Text style={est.filaNombre} numberOfLines={1}>
-                      {item.nombre}
-                    </Text>
-                    <Text style={est.filaMeta}>
-                      Tiene {item.puntos} pts
-                      {ganaria > 0 ? ` · con esta compra ganaría ~${ganaria} más` : ""}
-                    </Text>
-                  </View>
-                  <Text style={est.filaFlecha}>→</Text>
-                </Pressable>
-              )}
-            />
-
-            {/* Alta rápida */}
-            <View style={est.altaCaja}>
-              <Text style={est.altaLbl}>¿Es nuevo? Regístralo al vuelo:</Text>
-              <View style={{ flexDirection: "row", gap: 9 }}>
-                <TextInput
-                  style={[estiloInput, { flex: 1 }]}
-                  placeholder="Nombre del cliente"
-                  placeholderTextColor={T.textoTenue}
-                  value={altaNombre}
-                  onChangeText={setAltaNombre}
-                  autoCapitalize="words"
-                  onSubmitEditing={altaNombre.trim() ? crearRapido : undefined}
-                />
-                <Boton
-                  titulo="Crear"
-                  chico
-                  onPress={crearRapido}
-                  cargando={creando}
-                  deshabilitado={altaNombre.trim() === ""}
-                />
-              </View>
-              <TextInput
-                style={[
-                  estiloInput,
-                  { marginTop: 9 },
-                  altaCorreo.trim() !== "" && !correoValido(altaCorreo) && {
-                    borderColor: T.peligro,
-                  },
-                ]}
-                placeholder="Correo (opcional, para promociones)"
-                placeholderTextColor={T.textoTenue}
-                value={altaCorreo}
-                onChangeText={setAltaCorreo}
-                keyboardType="email-address"
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
-              {altaCorreo.trim() !== "" && !correoValido(altaCorreo) && (
-                <Text style={est.correoAviso}>
-                  Ese correo no parece válido; se creará sin correo y lo corriges después.
-                </Text>
-              )}
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-
-        {escanerAbierto && (
-          <EscanerCamara
-            modo="unico"
-            onCodigo={(c) => void alEscanearQr(c)}
-            onCerrar={() => setEscanerAbierto(false)}
+      {/* Alta rápida */}
+      <View
+        style={{
+          borderTopWidth: 1,
+          borderTopColor: T.borde,
+          paddingTop: T.esps.lg,
+          marginTop: T.esps.lg,
+        }}
+      >
+        <Txt escala="pie" tono="suave" fuerte estilo={{ marginBottom: T.esps.md }}>
+          ¿Es nuevo? Regístralo al vuelo:
+        </Txt>
+        <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+          <TextInput
+            style={[estiloInput, { flex: 1 }]}
+            placeholder="Nombre del cliente"
+            placeholderTextColor={T.textoTenue}
+            value={altaNombre}
+            onChangeText={setAltaNombre}
+            autoCapitalize="words"
+            onSubmitEditing={altaNombre.trim() ? crearRapido : undefined}
           />
-        )}
-      </SafeAreaView>
-    </Modal>
-  );
-}
+          <Boton
+            titulo="Crear"
+            chico
+            onPress={crearRapido}
+            cargando={creando}
+            deshabilitado={altaNombre.trim() === ""}
+          />
+        </View>
+        <TextInput
+          style={[
+            estiloInput,
+            { marginTop: T.esps.sm },
+            correoInvalido && { borderColor: T.peligro },
+          ]}
+          placeholder="Correo (opcional, para promociones)"
+          placeholderTextColor={T.textoTenue}
+          value={altaCorreo}
+          onChangeText={setAltaCorreo}
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoCorrect={false}
+        />
+        {correoInvalido ? (
+          <Txt escala="pie" tono="peligro" estilo={{ marginTop: T.esps.xs }}>
+            Ese correo no parece válido; se creará sin correo y lo corriges después.
+          </Txt>
+        ) : null}
+      </View>
 
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    qrBtn: {
-      flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 10,
-      backgroundColor: T.acentoSuave, borderWidth: 1.5, borderColor: T.acento,
-      borderRadius: T.radio, paddingVertical: 14, marginBottom: 14,
-    },
-    qrBtnTxt: { color: T.acento, fontSize: 15, fontWeight: "800" },
-    vacio: {
-      color: T.textoTenue, fontSize: 14, textAlign: "center",
-      marginTop: 40, paddingHorizontal: 30, lineHeight: 21,
-    },
-    filaCliente: {
-      flexDirection: "row", alignItems: "center", gap: 12,
-      backgroundColor: T.superficie, borderWidth: 1, borderColor: T.borde,
-      borderRadius: T.radio, padding: 13, marginBottom: 8,
-    },
-    filaNombre: { color: T.texto, fontSize: 15, fontWeight: "800" },
-    filaMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    filaFlecha: { color: T.turquesa, fontSize: 16, fontWeight: "800" },
-    altaCaja: {
-      borderTopWidth: 1, borderTopColor: T.borde,
-      paddingTop: 14, paddingBottom: 6,
-    },
-    altaLbl: { color: T.textoSuave, fontSize: 12.5, fontWeight: "700", marginBottom: 9 },
-    correoAviso: {
-      color: T.peligro, fontSize: 12, marginTop: 5, lineHeight: 17,
-    },
-  });
+      {escanerAbierto && (
+        <EscanerCamara
+          modo="unico"
+          onCodigo={(c) => void alEscanearQr(c)}
+          onCerrar={() => setEscanerAbierto(false)}
+        />
+      )}
+    </Hoja>
+  );
 }

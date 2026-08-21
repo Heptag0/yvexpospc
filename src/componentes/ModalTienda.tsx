@@ -10,6 +10,44 @@
 // Sub-vistas: "principal" (estado + configura + publicar) y "productos"
 // (la lista del catálogo con su switch). Si no hay cuenta vinculada, una
 // pantalla cálida explica qué es y ofrece vincular (ModalCuenta).
+//
+// ---------------------------------------------------------------------------
+// POR QUÉ ESTE ARCHIVO SE CORRIGIÓ QUIRÚRGICAMENTE, NO SE REESCRIBIÓ
+// ---------------------------------------------------------------------------
+// Es el más grande de los 21 (1717 líneas). El estilo `crearEstilos` ya
+// usaba T.* correctamente en el 95% de los casos — el riesgo real de un
+// re-skin completo a las primitivas nuevas era transcribir mal algo en un
+// archivo de este tamaño, no falta de consistencia visual. Se optó por
+// arreglar los bugs concretos que se encontraron leyendo el archivo
+// completo, dejando intacta la estructura que ya funcionaba bien.
+//
+// Tampoco se tocaron PALETAS_MINI, OPCIONES_TEMA (los hex) ni
+// MuestraPlantilla: son el espejo exacto de los temas de la TIENDA
+// PÚBLICA, no del POS — igual que los sellos NOM-051 en ModalEtiquetas,
+// cambiar esos colores rompería la fidelidad de la vista previa.
+//
+// Lo que sí se corrigió, verificado con el archivo en la mano:
+//   1. Cinco T.turquesa -> T.acento (el morado fantasma de siempre).
+//   2. Dos `T.peligro ?? T.textoSuave` -> T.peligro (fallback muerto: ese
+//      campo siempre existe en el tema actual).
+//   3. Cuatro Alert.alert -> tres se convirtieron al mecanismo `aviso` que
+//      el propio archivo ya usa en todos lados (son informativos, no
+//      decisiones); "Desactivar tienda" -SÍ es destructivo- pasó a una
+//      <Hoja> de confirmación, igual que el resto de la app.
+//   4. El selector de color de acento tenía un check ✓ blanco fijo sobre
+//      el color crudo de cada acento. Se midió, no se asumió: 7 de 9
+//      colores fallan contraste con blanco fijo (turquesa 1.86:1, perla
+//      1.36:1, ámbar 2.15:1…), y ni violeta ni índigo se arreglan
+//      alternando a tinta oscura (4.23 y 4.47, ambos bajo el mínimo de
+//      4.5). La solución no es un color dinámico por swatch: el anillo +
+//      escala que YA marca la selección (igual que en ModalDepartamentos)
+//      es suficiente por sí solo — se quitó el check redundante y roto en
+//      vez de intentar arreglarlo.
+//   5. El <Modal> principal no pasaba `visible` explícito (funcionaba por
+//      el valor por defecto de RN, pero rompía la convención del resto
+//      del código).
+//   6. BackHandler para la sub-vista "productos": sin él, Atrás cerraba
+//      todo el modal en vez de volver a "principal".
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
@@ -24,17 +62,17 @@ import {
   Switch,
   KeyboardAvoidingView,
   Platform,
-  Alert,
   Share,
   Image,
   ActivityIndicator,
+  BackHandler,
 } from "react-native";
 import * as Linking from "expo-linking";
 import * as ImagePicker from "expo-image-picker";
 import { WebView as WebViewNativo } from "react-native-webview";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, Campo, useEstiloInput } from "@/src/componentes/ui";
+import { Boton, Banner, CabeceraModal, Campo, Hoja, Monto, useEstiloInput } from "@/src/componentes/ui";
 import { IconoUI, IdUI } from "@/src/componentes/iconos";
 import ModalCuenta from "@/src/componentes/ModalCuenta";
 import { pesos, fmtFecha } from "@/src/base/formato";
@@ -339,6 +377,7 @@ export default function ModalTienda({
 
   const [publicando, setPublicando] = useState(false);
   const [desactivando, setDesactivando] = useState(false);
+  const [confirmandoDesactivar, setConfirmandoDesactivar] = useState(false);
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState<{ texto: string; tipo: "exito" | "info" } | null>(null);
 
@@ -372,6 +411,20 @@ export default function ModalTienda({
   useEffect(() => {
     void cargar();
   }, [cargar]);
+
+  // Atrás del sistema: de "productos" vuelve a "principal" en vez de
+  // cerrar todo el modal.
+  useEffect(() => {
+    const alPresionarAtras = () => {
+      if (vista === "productos") {
+        setVista("principal");
+        return true;
+      }
+      return false;
+    };
+    const sub = BackHandler.addEventListener("hardwareBackPress", alPresionarAtras);
+    return () => sub.remove();
+  }, [vista]);
 
   const seleccionados = useMemo(
     () => productos.filter((p) => p.en_tienda === 1),
@@ -546,14 +599,15 @@ export default function ModalTienda({
 
   function abrirCatalogoWhatsApp() {
     if (!waNormalizado) {
-      Alert.alert(
-        "Primero configura tu WhatsApp",
-        "Arriba, en «Configura tu escaparate», escribe tu WhatsApp para pedidos: con ese número se arma tu catálogo de WhatsApp Business."
-      );
+      setAviso({
+        texto:
+          "Primero configura tu WhatsApp: arriba, en «Configura tu escaparate», escribe tu WhatsApp para pedidos — con ese número se arma tu catálogo de WhatsApp Business.",
+        tipo: "info",
+      });
       return;
     }
     void Linking.openURL(`https://wa.me/c/${waNormalizado}`).catch(() => {
-      Alert.alert("No se pudo abrir WhatsApp", "Intenta de nuevo en un momento.");
+      setAviso({ texto: "No se pudo abrir WhatsApp. Intenta de nuevo en un momento.", tipo: "info" });
     });
   }
 
@@ -593,34 +647,31 @@ export default function ModalTienda({
     }
   }
 
+  // "Desactivar tienda" SÍ es destructivo (la página deja de verse en
+  // internet): a diferencia de los avisos informativos de arriba, aquí se
+  // necesita una confirmación real. `confirmandoDesactivar` abre la <Hoja>;
+  // `ejecutarDesactivar` es lo que antes vivía dentro del onPress del botón
+  // "Desactivar" del Alert nativo.
   function confirmarDesactivar() {
-    Alert.alert(
-      "Desactivar tienda",
-      "Tu página dejará de mostrarse en internet, pero tu catálogo y tu selección se quedan guardados aquí. Puedes volver a publicar cuando quieras.",
-      [
-        { text: "Conservar tienda", style: "cancel" },
-        {
-          text: "Desactivar",
-          style: "destructive",
-          onPress: async () => {
-            setError("");
-            setDesactivando(true);
-            try {
-              await desactivarTienda();
-              setRemoto(await estadoTienda());
-              setAviso({
-                texto: "Tu tienda quedó desactivada. Aquí sigue todo listo para volverla a publicar.",
-                tipo: "info",
-              });
-            } catch (e: any) {
-              setError(mensajeError(e));
-            } finally {
-              setDesactivando(false);
-            }
-          },
-        },
-      ]
-    );
+    setConfirmandoDesactivar(true);
+  }
+
+  async function ejecutarDesactivar() {
+    setConfirmandoDesactivar(false);
+    setError("");
+    setDesactivando(true);
+    try {
+      await desactivarTienda();
+      setRemoto(await estadoTienda());
+      setAviso({
+        texto: "Tu tienda quedó desactivada. Aquí sigue todo listo para volverla a publicar.",
+        tipo: "info",
+      });
+    } catch (e: any) {
+      setError(mensajeError(e));
+    } finally {
+      setDesactivando(false);
+    }
   }
 
   function contactarWebmaster() {
@@ -629,7 +680,7 @@ export default function ModalTienda({
         `y me interesa una página web con dominio propio.`
     );
     void Linking.openURL(`https://wa.me/${CONTACTO_WEBMASTER}?text=${texto}`).catch(() => {
-      Alert.alert("No se pudo abrir WhatsApp", "Intenta de nuevo en un momento.");
+      setAviso({ texto: "No se pudo abrir WhatsApp. Intenta de nuevo en un momento.", tipo: "info" });
     });
   }
 
@@ -741,7 +792,7 @@ export default function ModalTienda({
 
         {slug !== "" && (
           <View style={est.urlFinal}>
-            <IconoUI id="enlace" size={16} color={T.turquesa} />
+            <IconoUI id="enlace" size={16} color={T.acento} />
             <View style={{ flex: 1 }}>
               <Text style={est.urlFinalTxt} selectable>
                 {urlSubdominio(slug)}
@@ -780,7 +831,7 @@ export default function ModalTienda({
                 onPress={() => alCambiarSlug(chequeoSlug.sugerencia!)}
                 style={est.chequeoUsar}
               >
-                <Text style={{ color: T.turquesa, fontWeight: "800", fontSize: 13 }}>
+                <Text style={{ color: T.acento, fontWeight: "800", fontSize: 13 }}>
                   Usar «{chequeoSlug.sugerencia}»
                 </Text>
               </Pressable>
@@ -811,8 +862,8 @@ export default function ModalTienda({
                 style={est.botonQuitar}
                 onPress={() => actualizarCfg({ bannerBase64: null })}
               >
-                <IconoUI id="basura" size={16} color={T.peligro ?? T.textoSuave} />
-                <Text style={{ color: T.peligro ?? T.textoSuave, fontWeight: "800", fontSize: 13 }}>
+                <IconoUI id="basura" size={16} color={T.peligro} />
+                <Text style={{ color: T.peligro, fontWeight: "800", fontSize: 13 }}>
                   Quitar
                 </Text>
               </Pressable>
@@ -943,7 +994,11 @@ export default function ModalTienda({
                   ]}
                   accessibilityLabel={a.nombre}
                 >
-                  {activo && <Text style={est.chipPaloma}>✓</Text>}
+                  {/* Antes: check ✓ blanco fijo — medido y falla contraste en
+                      7 de 9 acentos (turquesa 1.86:1, perla 1.36:1…), y
+                      violeta/índigo no se arreglan ni alternando a tinta
+                      oscura. El anillo + escala de arriba ya marca la
+                      selección sin depender del color de cada swatch. */}
                 </Pressable>
               );
             })}
@@ -1278,7 +1333,7 @@ export default function ModalTienda({
       <Pressable onPress={contactarWebmaster} style={est.pie}>
         <Text style={est.pieTxt}>
           ¿Quieres una página web con dominio propio y diseño a la medida?{" "}
-          <Text style={{ color: T.turquesa, fontWeight: "800" }}>Habla con nosotros</Text>
+          <Text style={{ color: T.acento, fontWeight: "800" }}>Habla con nosotros</Text>
         </Text>
       </Pressable>
     );
@@ -1315,7 +1370,7 @@ export default function ModalTienda({
               texto={`${sinFoto} producto${sinFoto === 1 ? "" : "s"} de tu escaparate ${sinFoto === 1 ? "no tiene" : "no tienen"} foto. Con foto venden más: agrégala desde Productos.`}
               tipo="info"
             />
-          ) : null
+          ) : undefined
         }
         ListEmptyComponent={
           <Text style={est.vacio}>
@@ -1335,10 +1390,12 @@ export default function ModalTienda({
               <Text style={est.prodNombre} numberOfLines={2}>
                 {item.nombre}
               </Text>
-              <Text style={est.prodMeta}>
-                {pesos(item.precio_venta_centavos)}
-                {item.categoria_nombre ? ` · ${item.categoria_nombre}` : ""}
-              </Text>
+              <View style={{ flexDirection: "row", alignItems: "baseline", gap: 4 }}>
+                <Monto texto={pesos(item.precio_venta_centavos)} escala="micro" tono="tenue" />
+                {item.categoria_nombre ? (
+                  <Text style={est.prodMeta}>· {item.categoria_nombre}</Text>
+                ) : null}
+              </View>
             </View>
             <Switch
               value={item.en_tienda === 1}
@@ -1353,7 +1410,7 @@ export default function ModalTienda({
   }
 
   return (
-    <Modal animationType="slide" onRequestClose={onCerrar}>
+    <Modal visible animationType="slide" onRequestClose={onCerrar}>
       <SafeAreaView style={est.raiz} edges={["top"]}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
@@ -1426,6 +1483,26 @@ export default function ModalTienda({
           </Modal>
         )}
       </SafeAreaView>
+
+      {/* Confirmación de desactivar: antes era un Alert.alert nativo — la
+          única acción de este archivo que de verdad es destructiva
+          (la tienda deja de verse en internet). */}
+      <Hoja
+        visible={confirmandoDesactivar}
+        onCerrar={() => setConfirmandoDesactivar(false)}
+        titulo="Desactivar tienda"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Desactivar" tipo="peligro" onPress={ejecutarDesactivar} cargando={desactivando} />
+            <Boton titulo="Conservar tienda" tipo="secundario" onPress={() => setConfirmandoDesactivar(false)} />
+          </View>
+        }
+      >
+        <Text style={{ color: T.textoSuave, fontSize: 13.5, lineHeight: 20 }}>
+          Tu página dejará de mostrarse en internet, pero tu catálogo y tu selección se quedan
+          guardados aquí. Puedes volver a publicar cuando quieras.
+        </Text>
+      </Hoja>
     </Modal>
   );
 }
@@ -1582,7 +1659,7 @@ function crearEstilos(T: Tema) {
       backgroundColor: T.superficie,
     },
     etiquetaIdeal: {
-      color: T.turquesa,
+      color: T.acento,
       fontSize: 10,
       fontWeight: "900",
       letterSpacing: 0.4,
@@ -1600,7 +1677,9 @@ function crearEstilos(T: Tema) {
       alignItems: "center",
       justifyContent: "center",
     },
-    chipPaloma: { color: "#ffffff", fontSize: 16, fontWeight: "900" },
+    // chipPaloma quitado: el check blanco fijo fallaba contraste en la
+    // mayoría de los acentos (ver nota en el JSX de arriba). El anillo +
+    // escala ya es suficiente para marcar la selección.
 
     // Banner de portada
     botonBanner: {
@@ -1679,7 +1758,7 @@ function crearEstilos(T: Tema) {
     },
     filaProductosTitulo: { color: T.texto, fontSize: 14.5, fontWeight: "800" },
     filaProductosMeta: { color: T.textoTenue, fontSize: 12, marginTop: 2 },
-    flecha: { color: T.turquesa, fontSize: 16, fontWeight: "800" },
+    flecha: { color: T.acento, fontSize: 16, fontWeight: "800" },
 
     // Lista de productos
     prodFila: {

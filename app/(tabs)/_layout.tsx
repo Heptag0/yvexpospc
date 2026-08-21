@@ -9,6 +9,31 @@
 // React Navigation v7). No afecta la cámara: el escáner es un modal DENTRO de
 // Vender, no otra pestaña, y Vender conserva su estado (las pantallas de las
 // pestañas quedan montadas).
+//
+// ---------------------------------------------------------------------------
+// backBehavior="history"
+// ---------------------------------------------------------------------------
+// Sin esto, el botón/gesto Atrás de Android caía al comportamiento por
+// defecto del navegador de pestañas, que no es "vuelve por donde viniste"
+// sino saltar directo a la pestaña inicial — sin importar en cuál estuvieras.
+// Con "history" el sistema recuerda el ORDEN en que se visitaron las
+// pestañas y Atrás las deshace una por una, que es lo que cualquiera espera
+// de un botón que dice "atrás".
+//
+// Esto es complementario al BackHandler local de pantallas como Vender: ahí
+// se cierra primero lo que hay abierto DENTRO de la pestaña (un departamento,
+// una búsqueda) antes de que el evento llegue hasta aquí y cambie de pestaña.
+//
+// ---------------------------------------------------------------------------
+// tabBarBadge en Inicio — pedidos web nuevos
+// ---------------------------------------------------------------------------
+// React Navigation ya trae badges nativos en la barra de pestañas — no hace
+// falta inventar una insignia propia. `tabBarBadge` acepta directamente el
+// número a mostrar; con `undefined` no pinta nada. La consulta es la misma
+// `estadoTienda()` que ya usa Inicio para su propio badge dentro del panel
+// de Herramientas — aquí se repite intencionalmente (no se comparte estado
+// entre archivos) porque es una consulta ligera y evita construir un store
+// global solo para un número.
 
 import { useCallback, useEffect, useState } from "react";
 import { StyleSheet, View } from "react-native";
@@ -22,6 +47,7 @@ import Animated, {
 import { IconoUI, IdUI } from "@/src/componentes/iconos";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { leerModoUso, ModoUso } from "@/src/base/modoUso";
+import { estadoTienda } from "@/src/base/tienda";
 
 // Icono con indicador activo: una píldora pequeña bajo el icono. Ocupa el
 // mismo alto esté o no activa -> el label nunca salta. Al activarse, el
@@ -82,6 +108,7 @@ function IconoTab({
 export default function TabLayout() {
   const { tema: T } = useTema();
   const [modo, setModo] = useState<ModoUso>("ambos");
+  const [pedidosNuevos, setPedidosNuevos] = useState(0);
 
   useFocusEffect(
     useCallback(() => {
@@ -89,6 +116,15 @@ export default function TabLayout() {
       leerModoUso().then((m) => {
         if (vivo) setModo(m);
       });
+      // Tolerante a offline / sin cuenta: si falla, el badge simplemente no
+      // aparece — nunca debe romper la navegación por un pedido que no cargó.
+      estadoTienda()
+        .then((r) => {
+          if (vivo) setPedidosNuevos(r?.num_pedidos_nuevos ?? 0);
+        })
+        .catch(() => {
+          if (vivo) setPedidosNuevos(0);
+        });
       return () => {
         vivo = false;
       };
@@ -101,6 +137,7 @@ export default function TabLayout() {
 
   return (
     <Tabs
+      backBehavior="history"
       screenOptions={{
         headerShown: false,
         animation: "shift",
@@ -117,7 +154,15 @@ export default function TabLayout() {
         tabBarLabelStyle: { fontSize: 10, fontWeight: "700", marginTop: 2 },
       }}
     >
-      <Tabs.Screen name="index" options={{ title: "Inicio", tabBarIcon: icono("inicio") }} />
+      <Tabs.Screen
+        name="index"
+        options={{
+          title: "Inicio",
+          tabBarIcon: icono("inicio"),
+          tabBarBadge: pedidosNuevos > 0 ? pedidosNuevos : undefined,
+          tabBarBadgeStyle: { backgroundColor: T.peligro },
+        }}
+      />
       <Tabs.Screen
         name="vender"
         options={{

@@ -1,29 +1,49 @@
-// YvexPOS Móvil — Pantalla de Inventario (rediseñada, completa).
+// YvexPOS Móvil — Pantalla de Inventario.
 //
-// ARREGLOS DE RAÍZ:
-//   - Los modales se montan CONDICIONALMENTE ({visible && <Modal/>}): cada
-//     apertura crea estado fresco -> se acabaron los datos viejos pegados.
-//   - Carruseles horizontales con flexGrow:0 y alturas correctas -> se acabó
-//     el layout roto de "cuadrados gigantes".
-//   - Filtro de stock bajo con banner claro y botón "Quitar" -> nunca atascado.
+// Métricas, búsqueda, filtro por departamento, crear/editar (con kits),
+// ajuste rápido de stock, reporte de valorización y conteo físico.
+// Los modales se montan CONDICIONALMENTE ({visible && <Modal/>}): cada
+// apertura crea estado fresco, nunca datos viejos pegados.
 //
-// COMPLETO: métricas, búsqueda, filtro por departamento, crear/editar (con
-// kits), ajuste rápido de stock (botón ± en cada tarjeta), reporte de
-// valorización y conteo físico.
+// ---------------------------------------------------------------------------
+// LO QUE CAMBIÓ EN ESTA PASADA
+// ---------------------------------------------------------------------------
+// 1. CINCO BOTONES EN UNA FILA CON WRAP → SCROLLER HORIZONTAL.
+//    Reporte/Conteo/Departamentos/Escanear/Proveedores se envolvían en dos
+//    filas desiguales, con "Proveedores" solo. Un scroller nunca se rompe,
+//    sin importar cuántas acciones tenga — se desliza, no se acomoda mal.
+//
+// 2. CINCO TARJETAS DE MÉTRICA EN SCROLL, CORTADAS EN EL BORDE → JERARQUÍA.
+//    "Valor inventario" es la cifra que de verdad importa (cuánto dinero
+//    hay parado en el negocio): pasa a ser la ÚNICA <Lamina>, con margen y
+//    productos como apoyo dentro. "Stock bajo" y "En negativo" dejan de ser
+//    tarjetas pasivas y pasan a ser filas ACCIONABLES — tiene sentido que
+//    algo en lo que tocas para filtrar se vea como algo que se toca.
+//
+// 3. UNA CONSULTA A LA BASE POR CADA LETRA TECLEADA → DEBOUNCE.
+//    `cargar()` dependía de `busqueda` directamente, y como corre dentro de
+//    `useFocusEffect`, cada cambio de esa dependencia volvía a disparar el
+//    efecto — no solo al enfocar la pantalla, sino en cada tecla. Con un
+//    catálogo grande eso es una consulta completa por carácter. Ahora el
+//    campo de texto responde al instante (estado local) y la consulta real
+//    espera 300ms de silencio antes de ir a la base — el patrón estándar
+//    para buscadores que no quieren sentirse pesados.
+//
+// 4. TARJETAS MEMOIZADAS. Mismo patrón que en Vender: `onEditar`/`onAjustar`
+//    son funciones estables (`useCallback`), y las tarjetas son
+//    `React.memo`. El botón ± de ajuste rápido invita a toques repetidos —
+//    sin esto, cada toque re-renderiza las 50+ tarjetas visibles.
 
-import { useState, useCallback, useMemo } from "react";
+import { useState, useCallback, useEffect, useMemo, useRef, memo } from "react";
 import {
   View,
-  Text,
   FlatList,
-  StyleSheet,
   ActivityIndicator,
   RefreshControl,
   TextInput,
   Pressable,
   ScrollView,
-  type ViewStyle,
-  type TextStyle,
+  StyleSheet,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
@@ -39,8 +59,19 @@ import {
 import { sembrarSiVacio } from "@/src/base/semilla";
 import { pesos, fmtStock } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Insignia } from "@/src/componentes/ui";
+import {
+  Encabezado,
+  Lamina,
+  Grupo,
+  Fila,
+  Txt,
+  Monto,
+  Insignia,
+  Vacio,
+  useEstiloInput,
+} from "@/src/componentes/ui";
 import ImagenProducto from "@/src/componentes/ImagenProducto";
+import { IconoUI, IdUI } from "@/src/componentes/iconos";
 import SelectorVista, { Vista, columnasDe } from "@/src/componentes/SelectorVista";
 import FormularioProducto from "@/src/componentes/FormularioProducto";
 import ModalDepartamentos from "@/src/componentes/ModalDepartamentos";
@@ -50,21 +81,47 @@ import ModalConteo from "@/src/componentes/ModalConteo";
 import ModalEscanearTicket from "@/src/componentes/ModalEscanearTicket";
 import ModalProveedores from "@/src/componentes/ModalProveedores";
 
-type Tema = ReturnType<typeof useTema>["tema"];
+// Acciones secundarias: icono confirmado contra el mismo catálogo que ya usa
+// el resto de la app (ver src/base/herramientas.ts), nunca un id inventado.
+const ACCIONES: { id: string; icono: IdUI; label: string }[] = [
+  { id: "reporte", icono: "reportes", label: "Reporte" },
+  { id: "conteo", icono: "inventario", label: "Conteo físico" },
+  { id: "deptos", icono: "etiqueta", label: "Departamentos" },
+  { id: "escanear", icono: "escaner", label: "Escanear ticket" },
+  { id: "proveedores", icono: "camion", label: "Proveedores" },
+];
 
 export default function InventarioScreen() {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
+  const estiloInput = useEstiloInput();
   const [productos, setProductos] = useState<ProductoLista[]>([]);
   const [categorias, setCategorias] = useState<Categoria[]>([]);
   const [metricas, setMetricas] = useState<MetricasInventario | null>(null);
   const [cargando, setCargando] = useState(true);
   const [refrescando, setRefrescando] = useState(false);
 
+  // El campo de texto responde al instante; la CONSULTA a la base espera a
+  // que el usuario deje de teclear. Dos estados a propósito: uno para lo que
+  // se ve, otro para lo que se busca.
   const [busqueda, setBusqueda] = useState("");
+  const [busquedaConsulta, setBusquedaConsulta] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setBusquedaConsulta(busqueda), 300);
+    return () => clearTimeout(t);
+  }, [busqueda]);
+
   const [catFiltro, setCatFiltro] = useState<string | null>(null);
   const [soloStockBajo, setSoloStockBajo] = useState(false);
+  // Mutuamente excluyente con soloStockBajo: son dos alertas distintas (una
+  // es "hay que resurtir", la otra "algo no cuadró en el conteo"), pero solo
+  // tiene sentido mirar una a la vez — un producto en negativo casi siempre
+  // cuenta también como stock bajo, así que combinarlas sería redundante.
+  const [soloEnNegativo, setSoloEnNegativo] = useState(false);
   const [vista, setVista] = useState<Vista>("lista");
+
+  // Alterna qué valor muestra la lámina protagonista: a costo (lo que
+  // pagaste) o a precio de venta (lo que entraría si vendieras todo hoy).
+  const [mostrarPrecioVenta, setMostrarPrecioVenta] = useState(false);
 
   // Modales: null/false = NO MONTADO (estado fresco en cada apertura).
   const [formAbierto, setFormAbierto] = useState(false);
@@ -79,7 +136,12 @@ export default function InventarioScreen() {
   const cargar = useCallback(async () => {
     await sembrarSiVacio();
     const [prods, cats, mets] = await Promise.all([
-      listarProductos({ filtro: busqueda, categoriaId: catFiltro, soloStockBajo }),
+      listarProductos({
+        filtro: busquedaConsulta,
+        categoriaId: catFiltro,
+        soloStockBajo,
+        soloEnNegativo,
+      }),
       listarCategorias(),
       metricasInventario(),
     ]);
@@ -87,7 +149,7 @@ export default function InventarioScreen() {
     setCategorias(cats);
     setMetricas(mets);
     setCargando(false);
-  }, [busqueda, catFiltro, soloStockBajo]);
+  }, [busquedaConsulta, catFiltro, soloStockBajo, soloEnNegativo]);
 
   useFocusEffect(
     useCallback(() => {
@@ -101,184 +163,491 @@ export default function InventarioScreen() {
     setRefrescando(false);
   }, [cargar]);
 
-  function cerrarYRecargar() {
+  const cerrarYRecargar = useCallback(() => {
     setFormAbierto(false);
     setProductoEditar(null);
     setAjusteProducto(null);
     setConteoAbierto(false);
     cargar();
+  }, [cargar]);
+
+  // Estables para siempre: solo hacen setState con el argumento recibido.
+  // Es lo que permite que las tarjetas de abajo se memoicen de verdad.
+  const abrirEditar = useCallback((item: Producto) => {
+    setProductoEditar(item);
+    setFormAbierto(true);
+  }, []);
+  const abrirAjuste = useCallback((item: Producto) => {
+    setAjusteProducto(item);
+  }, []);
+
+  function accionar(id: string) {
+    if (id === "reporte") setReporteAbierto(true);
+    else if (id === "conteo") setConteoAbierto(true);
+    else if (id === "deptos") setDeptosAbierto(true);
+    else if (id === "escanear") setEscanerAbierto(true);
+    else if (id === "proveedores") setProveedoresAbierto(true);
+  }
+
+  function alternarStockBajo() {
+    setSoloStockBajo((v) => !v);
+    setSoloEnNegativo(false);
+  }
+  function alternarEnNegativo() {
+    setSoloEnNegativo((v) => !v);
+    setSoloStockBajo(false);
+  }
+  function quitarFiltroAlerta() {
+    setSoloStockBajo(false);
+    setSoloEnNegativo(false);
+  }
+
+  const cols = columnasDe(vista);
+  const hayFiltros = Boolean(busqueda || catFiltro || soloStockBajo || soloEnNegativo);
+
+  // ---------------------------------------------------------------------
+  // POR QUÉ LOS PRODUCTOS SE AGRUPAN EN FILAS EN VEZ DE USAR numColumns
+  // ---------------------------------------------------------------------
+  // React Native de verdad no permite cambiar `numColumns` en un FlatList ya
+  // montado — es una limitación real de la librería, no algo que se pueda
+  // configurar. La solución que ella misma documenta es forzar un remontaje
+  // completo cambiando la `key` del componente al cambiar de vista. Eso
+  // funciona, pero el efecto secundario ES el bug que se sentía: remontar
+  // significa tirar el FlatList entero y crear uno nuevo — de ahí el
+  // congelamiento de un segundo (vuelve a montar cada imagen e ícono
+  // visible desde cero) y el salto al principio (una instancia nueva
+  // siempre arranca con scroll en cero).
+  //
+  // La solución de raíz es que `numColumns` NUNCA cambie. Aquí se agrupan
+  // los productos en filas A MANO — cada fila es un array de 1 producto en
+  // vista de lista, o de `cols` productos en cuadrícula — y el FlatList
+  // por debajo SIEMPRE tiene una sola columna (nunca se le pasa
+  // `numColumns`). Cambiar de vista deja de ser un remontaje: es solo
+  // volver a calcular cómo se agrupan las mismas filas, y React actualiza
+  // el contenido de las celdas que ya existen en vez de crearlas de nuevo.
+  const filas = useMemo(() => {
+    const porFila = vista === "lista" ? 1 : cols;
+    const out: ProductoLista[][] = [];
+    for (let i = 0; i < productos.length; i += porFila) {
+      out.push(productos.slice(i, i + porFila));
+    }
+    return out;
+  }, [productos, vista, cols]);
+
+  // El salto a scroll 0 al cambiar de vista SIGUE siendo la decisión de
+  // producto correcta (una fila de la lista y una fila de cuadrícula no
+  // corresponden al mismo punto de scroll, así que mantener la posición
+  // sería mostrar productos "al azar"). La diferencia es que ahora se hace
+  // a propósito y al instante, no como efecto colateral de un remontaje de
+  // un segundo.
+  const listaRef = useRef<FlatList<ProductoLista[]>>(null);
+  useEffect(() => {
+    listaRef.current?.scrollToOffset({ offset: 0, animated: false });
+  }, [vista]);
+
+  // ---------------------------------------------------------------------
+  // LA CABECERA VIVE DENTRO DEL FlatList (ListHeaderComponent), NO AL LADO.
+  // ---------------------------------------------------------------------
+  // Antes: <Pantalla scroll={false}><View>cabecera</View><FlatList/></Pantalla>
+  // — dos hermanos repartiéndose el alto disponible vía flex, a través de
+  // varios niveles (SafeAreaView > Pantalla > View > FlatList). En la
+  // práctica no scrolleaba: se veían los primeros productos pero no había
+  // forma de bajar más — y depurar POR QUÉ exigía confiar en que cada nivel
+  // intermedio propagara flex:1 sin que nada lo rompiera.
+  //
+  // Con ListHeaderComponent el FlatList deja de tener un hermano con el que
+  // repartirse el alto — ES la única superficie con scroll de la pantalla,
+  // y la cabecera se desplaza como una fila más de su propio contenido. No
+  // hay reparto de flex que pueda salir mal porque ya no hay nada que
+  // repartir: es el patrón que React Native documenta para exactamente este
+  // caso (encabezado + lista), no un ajuste de estilo.
+  //
+  // Se pasa como FUNCIÓN, no como elemento ya construido: así FlatList no la
+  // re-monta de más entre renders.
+  //
+  // SOBRE EL MARGEN HORIZONTAL — una sola fuente, nunca el contenedor.
+  // El primer intento de arreglo puso `paddingHorizontal: T.esp` aquí Y lo
+  // dejó también en `contentContainerStyle` del FlatList (para la vista de
+  // lista). Como ListHeaderComponent se renderiza DENTRO de ese contenedor,
+  // el margen se sumaba dos veces en la cabecera y una sola vez en las
+  // filas — la cabecera quedaba visiblemente más angosta que la lista.
+  //
+  // La solución de raíz: `contentContainerStyle` YA NO aporta ningún margen
+  // horizontal (ver más abajo, `paddingHorizontal: 0` siempre). Cada bloque
+  // visual pone el suyo:
+  //   · Esta cabecera, aquí mismo.
+  //   · Cada fila en vista de lista, al envolverla en el renderItem.
+  //   · Cada fila en vista de cuadrícula, vía columnWrapperStyle.
+  // Ningún nivel intermedio vuelve a aportar margen por su cuenta.
+  function Cabecera() {
+    return (
+          <View style={{ paddingHorizontal: T.esp }}>
+            <Encabezado titulo="Inventario" />
+    
+            {/* Acciones: scroller horizontal — nunca se rompe, sin importar
+                cuántas entradas tenga. */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: T.esps.sm, paddingBottom: T.esps.lg }}
+            >
+              {ACCIONES.map((a) => (
+                <Pressable
+                  key={a.id}
+                  onPress={() => accionar(a.id)}
+                  android_ripple={{ color: T.acentoBorde }}
+                  style={({ pressed }) => [
+                    {
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: T.esps.sm,
+                      minHeight: 44,
+                      paddingHorizontal: T.esps.lg,
+                      borderRadius: T.radioPildora,
+                      backgroundColor: T.superficie2,
+                    },
+                    pressed && { backgroundColor: T.superficie3 },
+                  ]}
+                >
+                  <IconoUI id={a.icono} size={16} color={T.textoSuave} />
+                  <Txt escala="pie" tono="suave" fuerte>
+                    {a.label}
+                  </Txt>
+                </Pressable>
+              ))}
+            </ScrollView>
+    
+            {/* Valor del inventario — la única protagonista de la pantalla:
+                es la pregunta que un dueño se hace de verdad ("¿cuánto dinero
+                tengo parado en el changarro?"), no un dato entre cinco.
+                Se toca para alternar entre costo y precio de venta — la misma
+                lámina responde dos preguntas sin pedir una segunda pantalla. */}
+            {metricas ? (
+              <View style={{ marginBottom: T.esps.lg }}>
+                <Lamina onPress={() => setMostrarPrecioVenta((v) => !v)}>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                    }}
+                  >
+                    <Txt escala="micro" tono="suave" fuerte mayus>
+                      Valor de tu inventario
+                    </Txt>
+                    <View
+                      style={{
+                        flexDirection: "row",
+                        backgroundColor: T.superficie2,
+                        borderRadius: T.radioPildora,
+                        padding: 2,
+                      }}
+                    >
+                      <View
+                        style={{
+                          paddingHorizontal: T.esps.sm,
+                          paddingVertical: 3,
+                          borderRadius: T.radioPildora,
+                          backgroundColor: mostrarPrecioVenta ? "transparent" : T.acentoRelleno,
+                        }}
+                      >
+                        <Txt
+                          escala="micro"
+                          fuerte
+                          estilo={!mostrarPrecioVenta ? { color: T.acentoTexto } : { color: T.textoTenue }}
+                        >
+                          Costo
+                        </Txt>
+                      </View>
+                      <View
+                        style={{
+                          paddingHorizontal: T.esps.sm,
+                          paddingVertical: 3,
+                          borderRadius: T.radioPildora,
+                          backgroundColor: mostrarPrecioVenta ? T.acentoRelleno : "transparent",
+                        }}
+                      >
+                        <Txt
+                          escala="micro"
+                          fuerte
+                          estilo={mostrarPrecioVenta ? { color: T.acentoTexto } : { color: T.textoTenue }}
+                        >
+                          Venta
+                        </Txt>
+                      </View>
+                    </View>
+                  </View>
+                  <View style={{ marginTop: T.esps.xs }}>
+                    <Monto
+                      texto={pesos(
+                        mostrarPrecioVenta
+                          ? metricas.valor_precio_centavos
+                          : metricas.valor_costo_centavos
+                      )}
+                      escala="protagonista"
+                    />
+                  </View>
+                  <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }}>
+                    {mostrarPrecioVenta
+                      ? "Si vendieras todo hoy, a precio de venta"
+                      : "A costo de tus productos"}
+                  </Txt>
+    
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      marginTop: T.esps.lg,
+                      paddingTop: T.esps.lg,
+                      borderTopWidth: StyleSheet.hairlineWidth,
+                      borderTopColor: T.borde,
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Monto
+                        texto={
+                          metricas.margen_promedio != null
+                            ? `${Math.round(metricas.margen_promedio)}%`
+                            : "—"
+                        }
+                        escala="titulo"
+                      />
+                      <Txt escala="pie" tono="suave">
+                        margen promedio
+                      </Txt>
+                    </View>
+                    <View style={{ width: StyleSheet.hairlineWidth, backgroundColor: T.borde }} />
+                    <View style={{ flex: 1, paddingLeft: T.esps.lg }}>
+                      <Monto texto={String(metricas.total_productos)} escala="titulo" />
+                      <Txt escala="pie" tono="suave">
+                        productos en catálogo
+                      </Txt>
+                    </View>
+                  </View>
+                </Lamina>
+              </View>
+            ) : null}
+    
+            {/* Alertas accionables: se ven como algo que se toca, porque se
+                tocan — a diferencia de una tarjeta de métrica pasiva. */}
+            {metricas && (metricas.stock_bajo > 0 || metricas.en_negativo > 0) ? (
+              <View style={{ marginBottom: T.esps.lg }}>
+                <Grupo>
+                  {metricas.stock_bajo > 0 ? (
+                    <Fila
+                      titulo="Stock bajo"
+                      meta="Por resurtir pronto"
+                      icono={
+                        <View
+                          style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: T.alerta }}
+                        />
+                      }
+                      valor={<Monto texto={String(metricas.stock_bajo)} escala="cuerpo" tono="alerta" />}
+                      onPress={alternarStockBajo}
+                      flecha={false}
+                      destacado={soloStockBajo}
+                    />
+                  ) : null}
+                  {metricas.en_negativo > 0 ? (
+                    <Fila
+                      titulo="En negativo"
+                      meta="El stock quedó por debajo de cero — revisa el conteo"
+                      icono={
+                        <View
+                          style={{ width: 9, height: 9, borderRadius: 5, backgroundColor: T.peligro }}
+                        />
+                      }
+                      valor={<Monto texto={String(metricas.en_negativo)} escala="cuerpo" tono="peligro" />}
+                      onPress={alternarEnNegativo}
+                      flecha={false}
+                      destacado={soloEnNegativo}
+                    />
+                  ) : null}
+                </Grupo>
+              </View>
+            ) : null}
+    
+            {/* Buscador */}
+            <TextInput
+              style={[estiloInput, { marginBottom: T.esps.md }]}
+              placeholder="Buscar por nombre o código…"
+              placeholderTextColor={T.textoTenue}
+              value={busqueda}
+              onChangeText={setBusqueda}
+            />
+    
+            {/* Filtro de departamentos */}
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={{ gap: T.esps.sm, paddingBottom: T.esps.md }}
+            >
+              <ChipFiltro label="Todos" activo={catFiltro === null} onPress={() => setCatFiltro(null)} />
+              {categorias.map((c) => (
+                <ChipFiltro
+                  key={c.id}
+                  label={c.nombre}
+                  color={c.color ?? undefined}
+                  activo={catFiltro === c.id}
+                  onPress={() => setCatFiltro(catFiltro === c.id ? null : c.id)}
+                />
+              ))}
+            </ScrollView>
+    
+            {soloStockBajo || soloEnNegativo ? (
+              <View
+                style={{
+                  flexDirection: "row",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  backgroundColor: soloEnNegativo ? T.peligroSuave : T.alertaSuave,
+                  borderRadius: T.radioChico,
+                  paddingHorizontal: T.esps.lg,
+                  paddingVertical: T.esps.md,
+                  marginBottom: T.esps.md,
+                }}
+              >
+                <Txt escala="pie" tono={soloEnNegativo ? "peligro" : "alerta"} fuerte>
+                  {soloEnNegativo ? "Mostrando solo en negativo" : "Mostrando solo stock bajo"}
+                </Txt>
+                <Pressable
+                  onPress={quitarFiltroAlerta}
+                  hitSlop={10}
+                  style={{ minHeight: 32, justifyContent: "center" }}
+                >
+                  <Txt escala="pie" tono={soloEnNegativo ? "peligro" : "alerta"} fuerte>
+                    Quitar ✕
+                  </Txt>
+                </Pressable>
+              </View>
+            ) : null}
+    
+            <View
+              style={{
+                flexDirection: "row",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: T.esps.sm,
+              }}
+            >
+              <Txt escala="pie" tono="tenue" fuerte>
+                {productos.length} producto{productos.length === 1 ? "" : "s"}
+              </Txt>
+              <SelectorVista vista={vista} onCambio={setVista} />
+            </View>
+          </View>
+    );
   }
 
   return (
-    <SafeAreaView style={est.raiz} edges={["top"]}>
-      {/* ---------- Marca + título ---------- */}
-      <View style={est.cabecera}>
-        <Text style={est.marca}>
-          Yvex<Text style={{ color: T.turquesa }}>POS</Text>
-        </Text>
-        <Text style={est.titulo}>Inventario</Text>
-      </View>
+    <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }} edges={["top"]}>
 
-      {/* ---------- Acciones (fila flex con wrap: caben 4 botones) ---------- */}
-      <View style={est.acciones}>
-        <BotonAccion label="Reporte" onPress={() => setReporteAbierto(true)} />
-        <BotonAccion label="Conteo físico" onPress={() => setConteoAbierto(true)} />
-        <BotonAccion label="Departamentos" onPress={() => setDeptosAbierto(true)} />
-        <BotonAccion label="Escanear" onPress={() => setEscanerAbierto(true)} />
-        <BotonAccion label="Proveedores" onPress={() => setProveedoresAbierto(true)} />
-      </View>
-
-      {/* ---------- Métricas: UNA sola fila con scroll horizontal ----------
-          Las cifras importantes de un vistazo sin robarle pantalla a la
-          lista de productos; la tarjeta a medias indica que hay más. */}
-      {metricas && (
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          contentContainerStyle={est.metricas}
-        >
-          <Metrica
-            label="Valor inventario"
-            valor={pesos(metricas.valor_costo_centavos)}
-            pie="a costo"
-            principal
-          />
-          <Metrica
-            label="Margen prom."
-            valor={
-              metricas.margen_promedio != null
-                ? `${Math.round(metricas.margen_promedio)}%`
-                : "—"
+        {/* El FlatList es la ÚNICA superficie con scroll de la pantalla: la
+            cabecera entra como ListHeaderComponent, así no hay ningún
+            reparto de flex entre hermanos que pueda salir mal. */}
+        {cargando ? (
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <ActivityIndicator size="large" color={T.acento} />
+          </View>
+        ) : (
+          <FlatList
+            ref={listaRef}
+            style={{ flex: 1 }}
+            data={filas}
+            // Sin `key={vista}` y sin `numColumns`: es justo lo que evita el
+            // remontaje completo al cambiar de vista (ver el comentario de
+            // arriba, donde se arman `filas`). El FlatList de abajo es
+            // SIEMPRE de una sola columna; lista y cuadrícula son solo
+            // formas distintas de dibujar cada fila.
+            keyExtractor={(fila, i) => fila[0]?.id ?? `fila-${i}`}
+            // Sin paddingHorizontal aquí — a propósito. Ver el comentario en
+            // Cabecera() de arriba: si el contenedor también aporta margen,
+            // se suma con el de cada fila, y algo queda con el doble.
+            contentContainerStyle={{
+              paddingHorizontal: 0,
+              paddingBottom: 96,
+              gap: T.esps.sm,
+            }}
+            refreshControl={
+              <RefreshControl refreshing={refrescando} onRefresh={onRefresh} tintColor={T.acento} />
             }
-            pie="precio vs costo"
-          />
-          <Metrica
-            label="Stock bajo"
-            valor={String(metricas.stock_bajo)}
-            pie="por resurtir"
-            color={metricas.stock_bajo > 0 ? T.alerta : undefined}
-            onPress={() => setSoloStockBajo((v) => !v)}
-            activo={soloStockBajo}
-          />
-          {metricas.en_negativo > 0 && (
-            <Metrica
-              label="En negativo"
-              valor={String(metricas.en_negativo)}
-              pie="revisar"
-              color={T.peligro}
-            />
-          )}
-          <Metrica label="Productos" valor={String(metricas.total_productos)} pie="en catálogo" />
-        </ScrollView>
-      )}
-
-      {/* ---------- Buscador ---------- */}
-      <View style={est.buscadorCaja}>
-        <TextInput
-          style={est.buscador}
-          placeholder="Buscar por nombre o código…"
-          placeholderTextColor={T.textoTenue}
-          value={busqueda}
-          onChangeText={setBusqueda}
-        />
-      </View>
-
-      {/* ---------- Filtro de departamentos ---------- */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        style={est.filtrosScroll}
-        contentContainerStyle={est.filtros}
-      >
-        <ChipFiltro label="Todos" activo={catFiltro === null} onPress={() => setCatFiltro(null)} />
-        {categorias.map((c) => (
-          <ChipFiltro
-            key={c.id}
-            label={c.nombre}
-            color={c.color ?? undefined}
-            activo={catFiltro === c.id}
-            onPress={() => setCatFiltro(catFiltro === c.id ? null : c.id)}
-          />
-        ))}
-      </ScrollView>
-
-      {/* ---------- Banner de filtro activo (nunca más atascado) ---------- */}
-      {soloStockBajo && (
-        <View style={est.filtroActivo}>
-          <Text style={est.filtroActivoTxt}>Mostrando solo stock bajo</Text>
-          <Pressable onPress={() => setSoloStockBajo(false)} hitSlop={10}>
-            <Text style={est.filtroQuitar}>Quitar ✕</Text>
-          </Pressable>
-        </View>
-      )}
-
-      {/* ---------- Barra de vista ---------- */}
-      <View style={est.barraVista}>
-        <Text style={est.barraVistaTxt}>
-          {productos.length} producto{productos.length === 1 ? "" : "s"}
-        </Text>
-        <SelectorVista vista={vista} onCambio={setVista} />
-      </View>
-
-      {/* ---------- Lista / cuadrícula ---------- */}
-      {cargando ? (
-        <View style={est.centro}>
-          <ActivityIndicator size="large" color={T.acento} />
-        </View>
-      ) : (
-        <FlatList
-          data={productos}
-          key={vista}
-          numColumns={columnasDe(vista)}
-          columnWrapperStyle={columnasDe(vista) > 1 ? { gap: 9 } : undefined}
-          keyExtractor={(item) => item.id}
-          contentContainerStyle={est.lista}
-          refreshControl={
-            <RefreshControl refreshing={refrescando} onRefresh={onRefresh} tintColor={T.acento} />
-          }
-          ListEmptyComponent={
-            <Text style={est.vacio}>
-              {busqueda || catFiltro || soloStockBajo
-                ? "Sin resultados con estos filtros."
-                : "No hay productos. Toca + para crear el primero."}
-            </Text>
-          }
-          renderItem={({ item }) =>
-            vista === "lista" ? (
-              <TarjetaProducto
-                item={item}
-                onEditar={() => {
-                  setProductoEditar(item);
-                  setFormAbierto(true);
+            ListHeaderComponent={Cabecera}
+            ListEmptyComponent={
+              <View style={{ paddingHorizontal: T.esp }}>
+                <Vacio
+                  titulo={hayFiltros ? "Sin resultados con estos filtros" : "Todavía no hay productos"}
+                  texto={
+                    hayFiltros
+                      ? "Prueba con otra palabra, quita el filtro de departamento o el de stock bajo."
+                      : "Toca el botón + para crear el primero, o escanea un ticket de compra para darlos de alta de golpe."
+                  }
+                />
+              </View>
+            }
+            renderItem={({ item: fila }) => (
+              <View
+                style={{
+                  flexDirection: "row",
+                  gap: T.esps.sm,
+                  paddingHorizontal: T.esp,
                 }}
-                onAjustar={() => setAjusteProducto(item)}
-              />
-            ) : (
-              <TarjetaGrid
-                item={item}
-                cols={columnasDe(vista)}
-                onEditar={() => {
-                  setProductoEditar(item);
-                  setFormAbierto(true);
-                }}
-              />
-            )
-          }
-        />
-      )}
+              >
+                {fila.map((p) =>
+                  vista === "lista" ? (
+                    <TarjetaProducto
+                      key={p.id}
+                      item={p}
+                      onEditar={abrirEditar}
+                      onAjustar={abrirAjuste}
+                    />
+                  ) : (
+                    <TarjetaGrid key={p.id} item={p} cols={cols} onEditar={abrirEditar} />
+                  )
+                )}
+                {/* Rellenos invisibles en la última fila de cuadrícula: sin
+                    esto, si faltan piezas para completar la fila, las que sí
+                    hay se estiran de más (cada una es flex:1) y el grid deja
+                    de verse alineado con las filas de arriba. */}
+                {vista !== "lista" &&
+                  Array.from({ length: cols - fila.length }, (_, i) => (
+                    <View key={`relleno-${i}`} style={{ flex: 1 }} />
+                  ))}
+              </View>
+            )}
+          />
+        )}
 
-      {/* ---------- FAB crear ---------- */}
+      {/* FAB crear */}
       <Pressable
-        style={est.fab}
         onPress={() => {
           setProductoEditar(null);
           setFormAbierto(true);
         }}
+        accessibilityRole="button"
+        accessibilityLabel="Crear producto"
+        style={({ pressed }) => ({
+          position: "absolute",
+          right: T.esp,
+          bottom: T.esp,
+          width: 56,
+          height: 56,
+          borderRadius: 28,
+          backgroundColor: T.acentoRelleno,
+          alignItems: "center",
+          justifyContent: "center",
+          opacity: pressed ? 0.9 : 1,
+          shadowColor: T.acento,
+          shadowOpacity: 0.35,
+          shadowRadius: 14,
+          shadowOffset: { width: 0, height: 6 },
+          elevation: 6,
+        })}
       >
-        <Text style={est.fabTxt}>+</Text>
+        <Txt escala="titulo" estilo={{ color: T.acentoTexto, marginTop: -2 }}>
+          +
+        </Txt>
       </Pressable>
 
-      {/* ---------- Modales (montaje condicional = estado fresco) ---------- */}
+      {/* Modales (montaje condicional = estado fresco) */}
       {formAbierto && (
         <FormularioProducto
           producto={productoEditar}
@@ -291,10 +660,7 @@ export default function InventarioScreen() {
         />
       )}
       {deptosAbierto && (
-        <ModalDepartamentos
-          onCerrar={() => setDeptosAbierto(false)}
-          onCambio={cargar}
-        />
+        <ModalDepartamentos onCerrar={() => setDeptosAbierto(false)} onCambio={cargar} />
       )}
       {ajusteProducto && (
         <ModalAjusteStock
@@ -305,10 +671,7 @@ export default function InventarioScreen() {
       )}
       {reporteAbierto && <ModalReporte onCerrar={() => setReporteAbierto(false)} />}
       {conteoAbierto && (
-        <ModalConteo
-          onCerrar={() => setConteoAbierto(false)}
-          onAplicado={cerrarYRecargar}
-        />
+        <ModalConteo onCerrar={() => setConteoAbierto(false)} onAplicado={cerrarYRecargar} />
       )}
       {escanerAbierto && (
         <ModalEscanearTicket
@@ -320,37 +683,58 @@ export default function InventarioScreen() {
         />
       )}
       {proveedoresAbierto && (
-        <ModalProveedores
-          onCerrar={() => setProveedoresAbierto(false)}
-          onCambio={cargar}
-        />
+        <ModalProveedores onCerrar={() => setProveedoresAbierto(false)} onCambio={cargar} />
       )}
     </SafeAreaView>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Piezas
-// ---------------------------------------------------------------------------
+// ===========================================================================
+// Tarjetas memoizadas — mismo patrón y misma razón que en Vender: el botón ±
+// invita a toques repetidos, y sin memo cada toque re-renderiza toda la
+// lista visible en vez de solo la tarjeta tocada.
+// ===========================================================================
 
-function TarjetaProducto({
+function TarjetaProductoBase({
   item,
   onEditar,
   onAjustar,
 }: {
   item: ProductoLista;
-  onEditar: () => void;
-  onAjustar: () => void;
+  onEditar: (p: Producto) => void;
+  onAjustar: (p: Producto) => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const esKit = item.es_kit === 1;
   const bajo = !esKit && item.controla_stock === 1 && item.stock <= item.stock_minimo;
   return (
-    <Pressable style={({ pressed }) => [est.tarjeta, pressed && { backgroundColor: T.superficie3 }]} onPress={onEditar}>
-      {/* Barra de color del departamento */}
-      <View style={[est.tarjetaBarra, { backgroundColor: item.categoria_color ?? T.borde }]} />
-      <View style={est.tarjetaCuerpo}>
+    <Pressable
+      android_ripple={{ color: T.acentoBorde }}
+      onPress={() => onEditar(item)}
+      style={({ pressed }) => [
+        {
+          flex: 1,
+          flexDirection: "row",
+          alignItems: "center",
+          backgroundColor: T.superficie,
+          borderRadius: T.radio,
+          overflow: "hidden",
+          minHeight: 72,
+        },
+        pressed && { backgroundColor: T.superficie2 },
+      ]}
+    >
+      {/* Filo de color del departamento: el mismo lenguaje que la lámina. */}
+      <View style={{ width: 3, alignSelf: "stretch", backgroundColor: item.categoria_color ?? T.borde }} />
+      <View
+        style={{
+          flex: 1,
+          flexDirection: "row",
+          alignItems: "center",
+          gap: T.esps.md,
+          padding: T.esps.md,
+        }}
+      >
         <ImagenProducto
           uri={item.imagen_uri}
           nombre={item.nombre}
@@ -359,66 +743,98 @@ function TarjetaProducto({
           size={46}
           radio={11}
         />
-        <View style={est.tarjetaIzq}>
-          <View style={est.nombreFila}>
-            <Text style={est.nombre} numberOfLines={1}>{item.nombre}</Text>
-            {esKit && <Insignia texto="KIT" color={T.turquesa} />}
+        <View style={{ flex: 1 }}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm }}>
+            <Txt escala="cuerpo" fuerte lineas={1} estilo={{ flexShrink: 1 }}>
+              {item.nombre}
+            </Txt>
+            {esKit ? <Insignia texto="KIT" color={T.acento} /> : null}
           </View>
-          <Text style={est.meta} numberOfLines={1}>
+          <Txt escala="pie" tono="tenue" lineas={1} estilo={{ marginTop: 2 }}>
             {item.categoria_nombre ?? "Sin depto."}
             {item.codigo_barras ? `  ·  ${item.codigo_barras}` : ""}
-          </Text>
+          </Txt>
         </View>
-        <View style={est.tarjetaDer}>
-          <Text style={est.precio}>{pesos(item.precio_venta_centavos)}</Text>
+        <View style={{ alignItems: "flex-end" }}>
+          <Monto texto={pesos(item.precio_venta_centavos)} escala="cuerpo" />
           {esKit ? (
-            <Text style={est.stock}>arma {item.kit_disponible ?? 0}</Text>
+            <Txt escala="micro" tono="suave" estilo={{ marginTop: 2 }}>
+              arma {item.kit_disponible ?? 0}
+            </Txt>
           ) : item.controla_stock === 1 ? (
-            <Text style={[est.stock, bajo && { color: T.peligro, fontWeight: "700" }]}>
+            <Txt
+              escala="micro"
+              tono={bajo ? "peligro" : "suave"}
+              fuerte={bajo}
+              estilo={{ marginTop: 2 }}
+            >
               {fmtStock(item.stock, item.unidad)}
-              {bajo ? "  ▼" : ""}
-            </Text>
+              {bajo ? " ▼" : ""}
+            </Txt>
           ) : (
-            <Text style={est.stock}>sin control</Text>
+            <Txt escala="micro" tono="tenue" estilo={{ marginTop: 2 }}>
+              sin control
+            </Txt>
           )}
         </View>
-        {/* Ajuste rápido de stock */}
-        {!esKit && item.controla_stock === 1 && (
+        {!esKit && item.controla_stock === 1 ? (
           <Pressable
-            onPress={onAjustar}
+            onPress={() => onAjustar(item)}
             hitSlop={8}
-            style={({ pressed }) => [est.btnAjuste, pressed && { backgroundColor: T.acento }]}
+            android_ripple={{ color: T.acentoBorde, borderless: true }}
+            style={({ pressed }) => [
+              {
+                width: 34,
+                height: 34,
+                borderRadius: T.radioChico,
+                backgroundColor: T.superficie2,
+                alignItems: "center",
+                justifyContent: "center",
+              },
+              pressed && { backgroundColor: T.acentoSuave },
+            ]}
           >
-            <Text style={est.btnAjusteTxt}>±</Text>
+            <Txt escala="cuerpo" fuerte>
+              ±
+            </Txt>
           </Pressable>
-        )}
+        ) : null}
       </View>
     </Pressable>
   );
 }
+const TarjetaProducto = memo(TarjetaProductoBase);
 
-function TarjetaGrid({
+function TarjetaGridBase({
   item,
   cols,
   onEditar,
 }: {
   item: ProductoLista;
   cols: number;
-  onEditar: () => void;
+  onEditar: (p: Producto) => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const esKit = item.es_kit === 1;
   const bajo = !esKit && item.controla_stock === 1 && item.stock <= item.stock_minimo;
   const chico = cols >= 4;
   return (
     <Pressable
+      android_ripple={{ color: T.acentoBorde }}
+      onPress={() => onEditar(item)}
       style={({ pressed }) => [
-        est.gCard,
-        bajo && { borderColor: T.peligro + "88" },
-        pressed && { transform: [{ scale: 0.96 }], backgroundColor: T.superficie3 },
+        {
+          flex: 1,
+          alignItems: "center",
+          backgroundColor: T.superficie,
+          borderRadius: T.radio,
+          paddingVertical: T.esps.md,
+          paddingHorizontal: T.esps.sm,
+          borderWidth: bajo ? 1 : 0,
+          borderColor: bajo ? T.peligro : "transparent",
+        },
+        pressed && { transform: [{ scale: 0.96 }], backgroundColor: T.superficie2 },
       ]}
-      onPress={onEditar}
     >
       <ImagenProducto
         uri={item.imagen_uri}
@@ -428,75 +844,30 @@ function TarjetaGrid({
         size={chico ? 44 : cols === 2 ? 78 : 60}
         radio={chico ? 11 : 14}
       />
-      <Text style={[est.gNombre, chico && { fontSize: 10, minHeight: 24 }]} numberOfLines={2}>
-        {item.nombre}
-      </Text>
-      <Text style={[est.gPrecio, chico && { fontSize: 11.5 }]}>
-        {pesos(item.precio_venta_centavos)}
-      </Text>
-      {!esKit && item.controla_stock === 1 && (
-        <Text style={[est.gStock, bajo && { color: T.peligro, fontWeight: "800" }]}>
-          {fmtStock(item.stock, item.unidad)}
-        </Text>
-      )}
-    </Pressable>
-  );
-}
-
-function BotonAccion({ label, onPress }: { label: string; onPress: () => void }) {
-  const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
-  return (
-    <Pressable
-      onPress={onPress}
-      style={({ pressed }) => [est.accion, pressed && { backgroundColor: T.superficie3 }]}
-    >
-      <Text style={est.accionTxt} numberOfLines={1} adjustsFontSizeToFit>
-        {label}
-      </Text>
-    </Pressable>
-  );
-}
-
-function Metrica({
-  label,
-  valor,
-  pie,
-  principal,
-  color,
-  onPress,
-  activo,
-}: {
-  label: string;
-  valor: string;
-  pie?: string;
-  principal?: boolean;
-  color?: string;
-  onPress?: () => void;
-  activo?: boolean;
-}) {
-  const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
-  const Cont: any = onPress ? Pressable : View;
-  return (
-    <Cont
-      onPress={onPress}
-      style={[est.metrica, principal && est.metricaPrincipal, activo && est.metricaActiva]}
-    >
-      <Text style={est.metricaLbl} numberOfLines={1}>{label}</Text>
-      <Text
-        style={[est.metricaVal, color ? { color } : null]}
-        numberOfLines={1}
-        adjustsFontSizeToFit
-        minimumFontScale={0.7}
+      <Txt
+        escala={chico ? "micro" : "pie"}
+        lineas={2}
+        estilo={{ textAlign: "center", marginTop: T.esps.sm, minHeight: chico ? 24 : 30 }}
       >
-        {valor}
-      </Text>
-      <Text style={est.metricaPie} numberOfLines={1}>{pie ?? " "}</Text>
-    </Cont>
+        {item.nombre}
+      </Txt>
+      <Monto texto={pesos(item.precio_venta_centavos)} escala={chico ? "micro" : "pie"} tono="acento" />
+      {!esKit && item.controla_stock === 1 ? (
+        <Txt
+          escala="micro"
+          tono={bajo ? "peligro" : "tenue"}
+          fuerte={bajo}
+          estilo={{ marginTop: 2 }}
+        >
+          {fmtStock(item.stock, item.unidad)}
+        </Txt>
+      ) : null}
+    </Pressable>
   );
 }
+const TarjetaGrid = memo(TarjetaGridBase);
 
+// ---------------------------------------------------------------------------
 function ChipFiltro({
   label,
   activo,
@@ -509,217 +880,31 @@ function ChipFiltro({
   onPress: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   return (
     <Pressable
       onPress={onPress}
-      style={[
-        est.chipF,
-        activo && { backgroundColor: color ?? T.acento, borderColor: color ?? T.acento },
-      ]}
+      android_ripple={{ color: T.acentoBorde }}
+      style={{
+        flexDirection: "row",
+        alignItems: "center",
+        gap: T.esps.xs,
+        minHeight: 38,
+        paddingHorizontal: T.esps.lg,
+        borderRadius: T.radioPildora,
+        backgroundColor: activo ? (color ?? T.acentoRelleno) : T.superficie2,
+      }}
     >
-      {color && !activo ? <View style={[est.chipPunto, { backgroundColor: color }]} /> : null}
-      <Text style={[est.chipFTxt, activo && { color: T.acentoTexto, fontWeight: "800" }]} numberOfLines={1}>{label}</Text>
+      {color && !activo ? (
+        <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: color }} />
+      ) : null}
+      <Txt
+        escala="pie"
+        fuerte={activo}
+        tono="suave"
+        estilo={activo ? { color: T.acentoTexto } : undefined}
+      >
+        {label}
+      </Txt>
     </Pressable>
   );
-}
-
-// ---------------------------------------------------------------------------
-// Estilos (se construyen con el tema ACTIVO)
-// ---------------------------------------------------------------------------
-function crearEstilos(T: Tema) {
-  // Sombra/brillo de marca (antes `brilloAcento` de la paleta fija).
-  const brilloAcento: ViewStyle = {
-    shadowColor: T.acento,
-    shadowOpacity: 0.3,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 5,
-  };
-  // Profundidad sutil, igual que en Inicio y Vender.
-  const sombraSuave: ViewStyle = {
-    shadowColor: "#000",
-    shadowOpacity: 0.22,
-    shadowRadius: 12,
-    shadowOffset: { width: 0, height: 4 },
-    elevation: 2,
-  };
-  // Cifras alineadas: no "bailan" al cambiar.
-  const cifras: TextStyle = { fontVariant: ["tabular-nums"] };
-  return StyleSheet.create({
-  raiz: { flex: 1, backgroundColor: T.fondo },
-  cabecera: {
-    paddingHorizontal: T.esp,
-    paddingTop: 10,
-    paddingBottom: 4,
-  },
-  marca: { color: T.texto, fontSize: 13, fontWeight: "900", letterSpacing: 1.5, opacity: 0.85 },
-  titulo: { fontSize: 27, fontWeight: "800", color: T.texto, letterSpacing: -0.7, marginTop: 1 },
-  acciones: {
-    flexDirection: "row", flexWrap: "wrap", gap: 8,
-    paddingHorizontal: T.esp, marginBottom: 6,
-  },
-  accion: {
-    flex: 1,
-    minWidth: 70,
-    backgroundColor: T.superficie2,
-    borderWidth: 1,
-    borderColor: T.bordeFuerte,
-    borderRadius: 9,
-    paddingHorizontal: 8,
-    paddingVertical: 8,
-    minHeight: 40,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  accionTxt: { color: T.textoSuave, fontSize: 11.5, fontWeight: "700" },
-
-  // Métricas: fila única compacta con scroll horizontal; las tarjetas son
-  // bajitas para que la lista de productos recupere la pantalla.
-  metricas: {
-    gap: 8,
-    paddingHorizontal: T.esp,
-    paddingVertical: 4,
-    marginTop: 2,
-    marginBottom: 2,
-  },
-  metrica: {
-    minWidth: 106,
-    backgroundColor: T.superficie,
-    borderRadius: T.radio,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: T.borde,
-    justifyContent: "center",
-    ...sombraSuave,
-  },
-  metricaPrincipal: { borderLeftWidth: 4, borderLeftColor: T.acento },
-  metricaActiva: { borderColor: T.alerta, borderWidth: 1.5 },
-  metricaLbl: {
-    color: T.textoSuave, fontSize: 9, fontWeight: "800",
-    textTransform: "uppercase", letterSpacing: 0.6,
-  },
-  metricaVal: { color: T.texto, fontSize: 17, fontWeight: "800", marginTop: 2, ...cifras },
-  metricaPie: { color: T.textoTenue, fontSize: 9, marginTop: 1 },
-
-  buscadorCaja: { paddingHorizontal: T.esp, paddingTop: 12, paddingBottom: 8 },
-  buscador: {
-    backgroundColor: T.superficie2,
-    borderRadius: T.radio,
-    paddingHorizontal: 16,
-    paddingVertical: 13,
-    fontSize: 15,
-    color: T.texto,
-    borderWidth: 1,
-    borderColor: T.borde,
-  },
-
-  // Filtros: alto FIJO con aire suficiente -> nada se corta (bug 2 resuelto).
-  filtrosScroll: { flexGrow: 0, height: 52 },
-  filtros: { paddingHorizontal: T.esp, gap: 8, alignItems: "center", paddingVertical: 3 },
-  chipF: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 7,
-    paddingHorizontal: 15,
-    height: 40,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: T.borde,
-    backgroundColor: T.superficie2,
-  },
-  chipFTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "600" },
-  chipPunto: { width: 8, height: 8, borderRadius: 4 },
-
-  filtroActivo: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    backgroundColor: T.alertaSuave,
-    borderWidth: 1,
-    borderColor: T.alerta,
-    borderRadius: T.radioChico,
-    marginHorizontal: T.esp,
-    marginTop: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 9,
-  },
-  filtroActivoTxt: { color: T.alertaTexto, fontSize: 13, fontWeight: "700" },
-  filtroQuitar: { color: T.alerta, fontSize: 13, fontWeight: "800" },
-
-  centro: { flex: 1, alignItems: "center", justifyContent: "center" },
-  lista: { paddingHorizontal: T.esp, paddingTop: 10, paddingBottom: 140 },
-  vacio: {
-    textAlign: "center", color: T.textoTenue, marginTop: 44,
-    fontSize: 15, paddingHorizontal: 40, lineHeight: 22,
-  },
-
-  tarjeta: {
-    flexDirection: "row",
-    backgroundColor: T.superficie,
-    borderRadius: T.radio,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: T.borde,
-    overflow: "hidden",
-    ...sombraSuave,
-  },
-  tarjetaBarra: { width: 4 },
-  tarjetaCuerpo: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    padding: 14,
-    gap: 10,
-  },
-  tarjetaIzq: { flex: 1 },
-  nombreFila: { flexDirection: "row", alignItems: "center", gap: 8 },
-  nombre: { fontSize: 15.5, fontWeight: "700", color: T.texto, flexShrink: 1 },
-  meta: { fontSize: 12, color: T.textoTenue, marginTop: 3 },
-  tarjetaDer: { alignItems: "flex-end" },
-  precio: { fontSize: 16, fontWeight: "800", color: T.turquesa, ...cifras },
-  stock: { fontSize: 12.5, color: T.textoSuave, marginTop: 3 },
-  btnAjuste: {
-    width: 38,
-    height: 38,
-    borderRadius: 10,
-    backgroundColor: T.superficie2,
-    borderWidth: 1,
-    borderColor: T.bordeFuerte,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  btnAjusteTxt: { color: T.texto, fontSize: 18, fontWeight: "800", marginTop: -1 },
-
-  fab: {
-    position: "absolute",
-    right: T.esp,
-    bottom: 26,
-    width: 62,
-    height: 62,
-    borderRadius: 31,
-    backgroundColor: T.acento,
-    alignItems: "center",
-    justifyContent: "center",
-    ...brilloAcento,
-  },
-  fabTxt: { color: T.acentoTexto, fontSize: 34, fontWeight: "300", marginTop: -2 },
-  barraVista: {
-    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
-    paddingHorizontal: T.esp, paddingTop: 8, paddingBottom: 6,
-  },
-  barraVistaTxt: { color: T.textoTenue, fontSize: 12, fontWeight: "700" },
-  gCard: {
-    flex: 1, backgroundColor: T.superficie, borderRadius: T.radio + 2,
-    borderWidth: 1, borderColor: T.borde, alignItems: "center",
-    paddingVertical: 12, paddingHorizontal: 6, marginBottom: 9,
-  },
-  gNombre: {
-    color: T.texto, fontSize: 11.5, fontWeight: "700", textAlign: "center",
-    marginTop: 8, lineHeight: 14, minHeight: 28,
-  },
-  gPrecio: { color: T.turquesa, fontSize: 13, fontWeight: "800", marginTop: 3, ...cifras },
-  gStock: { color: T.textoTenue, fontSize: 10.5, marginTop: 2 },
-  });
 }

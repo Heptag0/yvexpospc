@@ -1,31 +1,39 @@
 // YvexPOS Móvil — Modal de PEDIDOS WEB (tienda en línea v3).
 //
-// Los pedidos que llegan por la tienda en internet (tienda.yvexiq.com) se
-// atienden aquí: lista más nuevos primero, filtro por estado, actualización
-// manual (pull-to-refresh y botón) y auto-refresh cada ~30 s mientras el
-// modal está abierto. Las transiciones son las del backend:
-// nuevo → preparando → listo → entregado; cancelado desde cualquiera menos
-// entregado. Todo con mensajes cálidos y tolerante a offline.
+// Los pedidos que llegan por la tienda en internet se atienden aquí: lista
+// más nuevos primero, filtro por estado, actualización manual
+// (pull-to-refresh y botón) y auto-refresh cada ~30 s mientras el modal
+// está abierto. Las transiciones son las del backend: nuevo → preparando →
+// listo → entregado; cancelado desde cualquiera menos entregado.
 //
 // Si no hay cuenta vinculada, una pantalla cálida explica qué es y ofrece
 // vincular (ModalCuenta), igual que ModalTienda.
+//
+// ---------------------------------------------------------------------------
+// QUÉ CAMBIÓ EN ESTA MIGRACIÓN
+// ---------------------------------------------------------------------------
+// 1. T.turquesa (enlace "Ver en el mapa") -> T.acento.
+// 2. El chip de filtro activo fijaba `color: "#ffffff"` en el texto. Con el
+//    acento "Perla" (claro) eso deja el texto ilegible sobre el propio
+//    chip — el mismo bug de contraste que ya se corrigió en el Chip de
+//    FormularioProducto. Ahora usa T.acentoTexto, que SÍ se resuelve según
+//    la luminosidad de cada acento.
+// 3. <Modal animationType="slide" onRequestClose={onCerrar}> no pasaba
+//    `visible` explícito — funcionaba (el valor por defecto de RN es
+//    true), pero rompía la convención del resto del código, donde todos
+//    los demás modales lo pasan explícito. Se añadió por consistencia, no
+//    porque estuviera roto.
+// 4. Alert.alert (cancelar pedido) -> <Hoja> chica anidada.
+// 5. Este modal NO tiene drill-down local (una sola vista, con lista +
+//    filtros) — no necesitaba BackHandler; el <Modal> ya cierra bien solo
+//    con onRequestClose.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  View,
-  Text,
-  Pressable,
-  StyleSheet,
-  Modal,
-  FlatList,
-  Alert,
-  RefreshControl,
-  ScrollView,
-} from "react-native";
+import { View, Pressable, Modal, FlatList, RefreshControl, ScrollView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as Linking from "expo-linking";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal } from "@/src/componentes/ui";
+import { Boton, Banner, CabeceraModal, Hoja, Txt, Monto } from "@/src/componentes/ui";
 import { IconoUI } from "@/src/componentes/iconos";
 import ModalCuenta from "@/src/componentes/ModalCuenta";
 import { pesos } from "@/src/base/formato";
@@ -53,8 +61,6 @@ import {
   urlMapaUbicacion,
 } from "@/src/base/tiendaReglas";
 import { registrarVentaWeb } from "@/src/base/venta";
-
-type Tema = ReturnType<typeof useTema>["tema"];
 
 // Filtros de la barra superior (flujo v3.1: nuevo → listo → entregado).
 // "nuevo" junta también los pedidos viejos en 'preparando' (legado: se
@@ -102,7 +108,6 @@ export default function ModalPedidosWeb({
   onCambio?: () => void;
 }) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
 
   const [cargando, setCargando] = useState(true);
   const [vinculado, setVinculado] = useState(false);
@@ -114,6 +119,7 @@ export default function ModalPedidosWeb({
   const [error, setError] = useState("");
   const [aviso, setAviso] = useState<{ texto: string; tipo: "exito" | "info" } | null>(null);
   const [negocio, setNegocio] = useState("tu tienda");
+  const [porCancelar, setPorCancelar] = useState<PedidoTienda | null>(null);
 
   // Aviso opcional al cliente tras cancelar o marcar listo (v3.1).
   const [avisoCliente, setAvisoCliente] = useState<{
@@ -162,8 +168,8 @@ export default function ModalPedidosWeb({
     void arranque();
   }, [arranque]);
 
-  // Auto-refresh cada ~30 s mientras el modal está abierto (silencioso:
-  // no muestra spinner ni borra la lista si falla).
+  // Auto-refresh cada ~30 s mientras el modal está abierto (silencioso: no
+  // muestra spinner ni borra la lista si falla).
   useEffect(() => {
     if (!vinculado) return;
     const t = setInterval(() => {
@@ -295,16 +301,11 @@ export default function ModalPedidosWeb({
     setAvisoCliente(null);
   }
 
-  function confirmarCancelar(p: PedidoTienda) {
-    Alert.alert(
-      "Cancelar pedido",
-      `¿Cancelar el pedido ${folioCortoPedido(p.id)} de ${p.cliente_nombre}? ` +
-        "Esta acción no se puede deshacer.",
-      [
-        { text: "Conservar pedido", style: "cancel" },
-        { text: "Cancelar pedido", style: "destructive", onPress: () => void mover(p, "cancelado") },
-      ]
-    );
+  async function confirmarCancelar() {
+    if (!porCancelar) return;
+    const p = porCancelar;
+    setPorCancelar(null);
+    await mover(p, "cancelado");
   }
 
   // --- Render ---
@@ -326,28 +327,44 @@ export default function ModalPedidosWeb({
 
   function renderSinCuenta() {
     return (
-      <ScrollView contentContainerStyle={est.cuerpo}>
-        <View style={est.heroVacio}>
+      <ScrollView contentContainerStyle={{ padding: T.esp }}>
+        <View
+          style={{
+            width: 72,
+            height: 72,
+            borderRadius: T.radioGrande,
+            backgroundColor: T.acentoSuave,
+            borderWidth: 1,
+            borderColor: T.acento,
+            alignItems: "center",
+            justifyContent: "center",
+            alignSelf: "center",
+            marginTop: T.esps.xl,
+            marginBottom: T.esps.lg,
+          }}
+        >
           <IconoUI id="pedido" size={34} color={T.acento} />
         </View>
-        <Text style={est.tituloGrande}>Tus pedidos de internet, aquí mismo</Text>
-        <Text style={est.parrafo}>
+        <Txt escala="titulo" fuerte estilo={{ textAlign: "center", marginBottom: T.esps.md }}>
+          Tus pedidos de internet, aquí mismo
+        </Txt>
+        <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.md }}>
           Cuando publicas tu tienda en línea, tus clientes pueden pedir desde
           su teléfono y esos pedidos llegan a esta pantalla: los preparas, los
           marcas listos y los entregas, todo desde tu POS.
-        </Text>
+        </Txt>
         <Boton titulo="Vincular mi cuenta" onPress={() => setCuentaAbierta(true)} />
-        <Text style={est.notaCalma}>
+        <Txt escala="pie" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.md }}>
           Sin cuenta, la app sigue funcionando igual de completa: vender,
           inventario, clientes y reportes no necesitan internet.
-        </Text>
+        </Txt>
       </ScrollView>
     );
   }
 
   function renderFiltros() {
     return (
-      <View style={est.filtros}>
+      <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.sm, marginBottom: T.esps.lg }}>
         {FILTROS.map((f) => {
           const activo = filtro === f.id;
           const n = conteos[f.id];
@@ -355,12 +372,24 @@ export default function ModalPedidosWeb({
             <Pressable
               key={f.id}
               onPress={() => setFiltro(f.id)}
-              style={[est.filtro, activo && { backgroundColor: T.acento, borderColor: T.acento }]}
+              style={{
+                paddingHorizontal: T.esps.md,
+                paddingVertical: T.esps.sm,
+                borderRadius: T.radioPildora,
+                borderWidth: 1.5,
+                borderColor: activo ? T.acentoRelleno : T.borde,
+                backgroundColor: activo ? T.acentoRelleno : T.superficie,
+              }}
             >
-              <Text style={[est.filtroTxt, activo && { color: "#ffffff" }]}>
+              <Txt
+                escala="pie"
+                fuerte
+                tono={activo ? "principal" : "suave"}
+                estilo={activo ? { color: T.acentoTexto } : undefined}
+              >
                 {f.etiqueta}
                 {n > 0 ? ` (${n})` : ""}
-              </Text>
+              </Txt>
             </Pressable>
           );
         })}
@@ -374,83 +403,103 @@ export default function ModalPedidosWeb({
     const puedeCancelar = TRANSICIONES_PEDIDO[p.estado]?.includes("cancelado") === true;
     const ocupado = cambiandoId === p.id;
     return (
-      <View style={est.tarjeta}>
-        <View style={est.tarjetaCabecera}>
-          <Text style={est.folio}>{folioCortoPedido(p.id)}</Text>
-          <Text style={est.hora}>{horaRelativa(p.creado_en, ahoraMs)}</Text>
-          <View style={[est.chipEstado, { backgroundColor: col.fondo }]}>
-            <Text style={[est.chipEstadoTxt, { color: col.texto }]}>
+      <View
+        style={{
+          backgroundColor: T.superficie,
+          borderWidth: 1,
+          borderColor: T.borde,
+          borderRadius: T.radioGrande,
+          padding: T.esps.lg,
+          marginBottom: T.esps.md,
+        }}
+      >
+        <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, marginBottom: T.esps.sm }}>
+          <Monto texto={folioCortoPedido(p.id)} escala="pie" />
+          <Txt escala="pie" tono="tenue" estilo={{ flex: 1 }}>
+            {horaRelativa(p.creado_en, ahoraMs)}
+          </Txt>
+          <View style={{ borderRadius: T.radioPildora, paddingHorizontal: T.esps.sm, paddingVertical: 4, backgroundColor: col.fondo }}>
+            <Txt escala="micro" fuerte estilo={{ color: col.texto }}>
               {etiquetaEstadoPedido(p.estado)}
-            </Text>
+            </Txt>
           </View>
         </View>
 
-        <Text style={est.cliente}>{p.cliente_nombre}</Text>
+        <Txt escala="cuerpo" fuerte estilo={{ marginBottom: T.esps.sm }}>
+          {p.cliente_nombre}
+        </Txt>
         {(p.cliente_telefono.trim() !== "" || (p.cliente_correo ?? "").trim() !== "") && (
-          <View style={est.contactoFila}>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.xs, marginTop: -4, marginBottom: T.esps.sm }}>
             <IconoUI id="persona" size={13} color={T.textoTenue} />
-            <Text style={est.contactoTxt} numberOfLines={1}>
-              {[
-                p.cliente_telefono.trim(),
-                (p.cliente_correo ?? "").trim(),
-              ]
-                .filter((c) => c !== "")
-                .join(" · ")}
-            </Text>
+            <Txt escala="micro" tono="tenue" lineas={1} estilo={{ flex: 1 }}>
+              {[p.cliente_telefono.trim(), (p.cliente_correo ?? "").trim()].filter((c) => c !== "").join(" · ")}
+            </Txt>
           </View>
         )}
 
-        <View style={est.items}>
+        <View style={{ gap: 4, marginBottom: T.esps.sm }}>
           {p.items.map((it, i) => (
-            <View key={`${it.producto_id}-${i}`} style={est.itemFila}>
-              <Text style={est.itemCant}>{it.cantidad} ×</Text>
-              <Text style={est.itemNombre} numberOfLines={2}>
+            <View key={`${it.producto_id}-${i}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: T.esps.sm }}>
+              <Txt escala="pie" tono="suave" fuerte estilo={{ minWidth: 34 }}>
+                {it.cantidad} ×
+              </Txt>
+              <Txt escala="pie" estilo={{ flex: 1 }} lineas={2}>
                 {it.nombre}
-              </Text>
-              <Text style={est.itemPrecio}>{pesos(it.precio_centavos * it.cantidad)}</Text>
+              </Txt>
+              <Monto texto={pesos(it.precio_centavos * it.cantidad)} escala="pie" tono="suave" />
             </View>
           ))}
         </View>
 
-        <View style={est.totalFila}>
-          <Text style={est.totalEtiqueta}>Total</Text>
-          <Text style={est.totalValor}>{pesos(p.total_centavos)}</Text>
+        <View
+          style={{
+            flexDirection: "row",
+            justifyContent: "space-between",
+            alignItems: "center",
+            borderTopWidth: 1,
+            borderTopColor: T.borde,
+            paddingTop: T.esps.sm,
+            marginBottom: T.esps.sm,
+          }}
+        >
+          <Txt escala="pie" tono="suave" fuerte>Total</Txt>
+          <Monto texto={pesos(p.total_centavos)} escala="cuerpo" />
         </View>
 
-        <View style={est.metaFila}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: T.esps.sm, marginBottom: 5 }}>
           <IconoUI id={p.entrega === "domicilio" ? "camion" : "tienda"} size={15} color={T.textoSuave} />
-          <Text style={est.metaTxt}>
+          <Txt escala="pie" tono="suave" estilo={{ flex: 1 }}>
             {etiquetaEntregaPedido(p.entrega)}
             {p.entrega === "domicilio" && p.direccion ? ` — ${p.direccion}` : ""}
-          </Text>
+          </Txt>
         </View>
         {urlMapaUbicacion(p.ubicacion) !== "" && (
           <Pressable
-            style={est.metaFila}
+            style={{ flexDirection: "row", alignItems: "flex-start", gap: T.esps.sm, marginBottom: 5 }}
             onPress={() => {
               void Linking.openURL(urlMapaUbicacion(p.ubicacion)).catch(() => {
                 setAviso({ texto: "No se pudo abrir el mapa. Intenta de nuevo en un momento.", tipo: "info" });
               });
             }}
           >
-            <IconoUI id="enlace" size={15} color={T.turquesa} />
-            <Text style={[est.metaTxt, { color: T.turquesa, fontWeight: "800" }]}>
+            <IconoUI id="enlace" size={15} color={T.acento} />
+            <Txt escala="pie" tono="acento" fuerte>
               Ver en el mapa
-            </Text>
+            </Txt>
           </Pressable>
         )}
-        <View style={est.metaFila}>
+        <View style={{ flexDirection: "row", alignItems: "flex-start", gap: T.esps.sm, marginBottom: 5 }}>
           <IconoUI id="etiqueta" size={15} color={T.textoSuave} />
-          <Text style={est.metaTxt}>{etiquetaPagoPedido(p.pago)}</Text>
+          <Txt escala="pie" tono="suave">{etiquetaPagoPedido(p.pago)}</Txt>
         </View>
         {p.cliente_notas ? (
-          <View style={est.notas}>
-            <Text style={est.notasTxt}>“{p.cliente_notas}”</Text>
+          <View style={{ backgroundColor: T.superficie2, borderRadius: T.radio, padding: T.esps.sm, marginTop: 4 }}>
+            <Txt escala="pie" tono="suave">"{p.cliente_notas}"</Txt>
           </View>
         ) : null}
 
         {(avance || puedeCancelar) && (
-          <View style={est.acciones}>
+          <View style={{ flexDirection: "row", gap: T.esps.sm, marginTop: T.esps.md, flexWrap: "wrap" }}>
             {avance && (
               <Boton
                 titulo={avance.titulo}
@@ -466,7 +515,7 @@ export default function ModalPedidosWeb({
                 chico
                 tipo="fantasma"
                 deshabilitado={cambiandoId !== null}
-                onPress={() => confirmarCancelar(p)}
+                onPress={() => setPorCancelar(p)}
               />
             )}
           </View>
@@ -481,12 +530,16 @@ export default function ModalPedidosWeb({
       listo: "No hay pedidos listos esperando entrega.",
       historial: "Aquí verás tus pedidos entregados y cancelados.",
     };
-    return <Text style={est.vacio}>{textos[filtro]}</Text>;
+    return (
+      <Txt escala="pie" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.xl, paddingHorizontal: T.esps.lg }}>
+        {textos[filtro]}
+      </Txt>
+    );
   }
 
   return (
-    <Modal animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz} edges={["top"]}>
+    <Modal visible animationType="slide" onRequestClose={onCerrar}>
+      <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }} edges={["top"]}>
         <CabeceraModal
           titulo="Pedidos web"
           izquierda="Cerrar"
@@ -499,8 +552,8 @@ export default function ModalPedidosWeb({
           derechaCargando={refrescando}
         />
         {cargando ? (
-          <View style={est.cargando}>
-            <Text style={est.vacio}>Buscando tus pedidos…</Text>
+          <View style={{ flex: 1, alignItems: "center", justifyContent: "center" }}>
+            <Txt escala="pie" tono="tenue">Buscando tus pedidos…</Txt>
           </View>
         ) : !vinculado ? (
           renderSinCuenta()
@@ -508,23 +561,28 @@ export default function ModalPedidosWeb({
           <FlatList
             data={visibles}
             keyExtractor={(p) => p.id}
-            contentContainerStyle={est.cuerpo}
+            contentContainerStyle={{ padding: T.esp, paddingTop: T.esps.md, paddingBottom: T.esps.xxl }}
             refreshControl={
-              <RefreshControl
-                refreshing={refrescando}
-                onRefresh={() => void refrescarManual()}
-                tintColor={T.acento}
-              />
+              <RefreshControl refreshing={refrescando} onRefresh={() => void refrescarManual()} tintColor={T.acento} />
             }
             ListHeaderComponent={
               <>
                 {error ? <Banner texto={error} tipo="error" /> : null}
                 {aviso ? <Banner texto={aviso.texto} tipo={aviso.tipo} /> : null}
                 {avisoCliente && (
-                  <View style={est.avisoCliente}>
-                    <View style={{ flexDirection: "row", alignItems: "center", gap: 10 }}>
+                  <View
+                    style={{
+                      backgroundColor: T.acentoSuave,
+                      borderWidth: 1,
+                      borderColor: T.acento,
+                      borderRadius: T.radioGrande,
+                      padding: T.esps.md,
+                      marginBottom: T.esps.md,
+                    }}
+                  >
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm }}>
                       <IconoUI id="compartir" size={18} color={T.acento} />
-                      <Text style={est.avisoClienteTxt}>
+                      <Txt escala="pie" fuerte estilo={{ flex: 1 }}>
                         {(() => {
                           const porCorreo = !telefonoParaWhatsApp(avisoCliente.pedido.cliente_telefono);
                           const canal = porCorreo ? "por correo" : "por WhatsApp";
@@ -532,9 +590,9 @@ export default function ModalPedidosWeb({
                             ? `Pedido ${folioCortoPedido(avisoCliente.pedido.id)} cancelado. ¿Le avisamos a ${avisoCliente.pedido.cliente_nombre} ${canal}?`
                             : `¡${folioCortoPedido(avisoCliente.pedido.id)} listo! ¿Le avisamos a ${avisoCliente.pedido.cliente_nombre} ${canal}?`;
                         })()}
-                      </Text>
+                      </Txt>
                     </View>
-                    <View style={{ flexDirection: "row", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
+                    <View style={{ flexDirection: "row", gap: T.esps.sm, marginTop: T.esps.md, flexWrap: "wrap" }}>
                       <Boton
                         titulo={(() => {
                           const porCorreo = !telefonoParaWhatsApp(avisoCliente.pedido.cliente_telefono);
@@ -545,12 +603,7 @@ export default function ModalPedidosWeb({
                         chico
                         onPress={abrirAvisoCliente}
                       />
-                      <Boton
-                        titulo="Ahora no"
-                        chico
-                        tipo="fantasma"
-                        onPress={() => setAvisoCliente(null)}
-                      />
+                      <Boton titulo="Ahora no" chico tipo="fantasma" onPress={() => setAvisoCliente(null)} />
                     </View>
                   </View>
                 )}
@@ -575,127 +628,25 @@ export default function ModalPedidosWeb({
           />
         )}
       </SafeAreaView>
+
+      {/* Confirmación de cancelar pedido: hoja chica, sin Alert nativo. */}
+      <Hoja
+        visible={porCancelar !== null}
+        onCerrar={() => setPorCancelar(null)}
+        titulo="Cancelar pedido"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Cancelar pedido" tipo="peligro" onPress={confirmarCancelar} />
+            <Boton titulo="Conservar pedido" tipo="secundario" onPress={() => setPorCancelar(null)} />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {porCancelar
+            ? `¿Cancelar el pedido ${folioCortoPedido(porCancelar.id)} de ${porCancelar.cliente_nombre}? Esta acción no se puede deshacer.`
+            : ""}
+        </Txt>
+      </Hoja>
     </Modal>
   );
-}
-
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-    raiz: { flex: 1, backgroundColor: T.fondo },
-    cuerpo: { padding: T.esp, paddingTop: 16, paddingBottom: 40 },
-    cargando: { flex: 1, alignItems: "center", justifyContent: "center" },
-    vacio: {
-      color: T.textoTenue,
-      fontSize: 14,
-      lineHeight: 20,
-      textAlign: "center",
-      marginTop: 24,
-      paddingHorizontal: 20,
-    },
-
-    // Sin cuenta
-    heroVacio: {
-      width: 72,
-      height: 72,
-      borderRadius: 22,
-      backgroundColor: T.acentoSuave,
-      borderWidth: 1,
-      borderColor: T.acento,
-      alignItems: "center",
-      justifyContent: "center",
-      alignSelf: "center",
-      marginTop: 26,
-      marginBottom: 18,
-    },
-    tituloGrande: {
-      color: T.texto,
-      fontSize: 22,
-      fontWeight: "800",
-      letterSpacing: -0.4,
-      textAlign: "center",
-      marginBottom: 14,
-    },
-    parrafo: { color: T.textoSuave, fontSize: 14.5, lineHeight: 21, marginBottom: 12 },
-    notaCalma: {
-      color: T.textoTenue,
-      fontSize: 12.5,
-      lineHeight: 18,
-      textAlign: "center",
-      marginTop: 14,
-    },
-
-    // Filtros
-    filtros: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 14 },
-    filtro: {
-      paddingHorizontal: 13,
-      paddingVertical: 8,
-      borderRadius: 999,
-      borderWidth: 1.5,
-      borderColor: T.borde,
-      backgroundColor: T.superficie,
-    },
-    filtroTxt: { color: T.textoSuave, fontSize: 12.5, fontWeight: "800" },
-
-    // Aviso al cliente (tras cancelar o marcar listo)
-    avisoCliente: {
-      backgroundColor: T.acentoSuave,
-      borderWidth: 1,
-      borderColor: T.acento,
-      borderRadius: T.radioGrande,
-      padding: 14,
-      marginBottom: 14,
-    },
-    avisoClienteTxt: { color: T.texto, fontSize: 13.5, fontWeight: "700", lineHeight: 19, flex: 1 },
-
-    // Tarjeta de pedido
-    tarjeta: {
-      backgroundColor: T.superficie,
-      borderWidth: 1,
-      borderColor: T.borde,
-      borderRadius: T.radioGrande,
-      padding: 15,
-      marginBottom: 12,
-    },
-    tarjetaCabecera: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 6 },
-    folio: { color: T.texto, fontSize: 14, fontWeight: "900", letterSpacing: 0.3 },
-    hora: { color: T.textoTenue, fontSize: 12, flex: 1 },
-    chipEstado: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
-    chipEstadoTxt: { fontSize: 11, fontWeight: "900" },
-    cliente: { color: T.texto, fontSize: 15.5, fontWeight: "800", marginBottom: 8 },
-    contactoFila: {
-      flexDirection: "row",
-      alignItems: "center",
-      gap: 6,
-      marginTop: -4,
-      marginBottom: 8,
-    },
-    contactoTxt: { color: T.textoTenue, fontSize: 12, flex: 1 },
-    items: { gap: 4, marginBottom: 10 },
-    itemFila: { flexDirection: "row", alignItems: "flex-start", gap: 8 },
-    itemCant: { color: T.textoSuave, fontSize: 13, fontWeight: "700", minWidth: 34 },
-    itemNombre: { color: T.texto, fontSize: 13.5, flex: 1, lineHeight: 19 },
-    itemPrecio: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
-    totalFila: {
-      flexDirection: "row",
-      justifyContent: "space-between",
-      alignItems: "center",
-      borderTopWidth: 1,
-      borderTopColor: T.borde,
-      paddingTop: 10,
-      marginBottom: 10,
-    },
-    totalEtiqueta: { color: T.textoSuave, fontSize: 13, fontWeight: "800" },
-    totalValor: { color: T.texto, fontSize: 16.5, fontWeight: "900" },
-    metaFila: { flexDirection: "row", alignItems: "flex-start", gap: 8, marginBottom: 5 },
-    metaTxt: { color: T.textoSuave, fontSize: 12.5, lineHeight: 18, flex: 1 },
-    notas: {
-      backgroundColor: T.superficie2,
-      borderRadius: T.radio,
-      padding: 10,
-      marginTop: 4,
-      marginBottom: 2,
-    },
-    notasTxt: { color: T.textoSuave, fontSize: 12.5, lineHeight: 18, fontStyle: "italic" },
-    acciones: { flexDirection: "row", gap: 10, marginTop: 12, flexWrap: "wrap" },
-  });
 }

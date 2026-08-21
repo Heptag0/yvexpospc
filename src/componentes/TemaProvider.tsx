@@ -3,6 +3,16 @@
 // Envuelve toda la app y reparte la paleta activa. Cuando el usuario cambia
 // el tema en Configuración, TODA la interfaz se actualiza al instante sin
 // reiniciar.
+//
+// ---------------------------------------------------------------------------
+// setDensidad / setBordes — por qué se añaden ahora
+// ---------------------------------------------------------------------------
+// `apariencia.ts` ya traía `densidad` y `bordes` en `Preferencias` y en
+// `construirTema` desde la Fase 1, pero este archivo nunca se actualizó para
+// exponer cómo CAMBIARLOS. El resultado era un hueco silencioso: los tokens
+// existían y `Ajustes` podía en teoría mostrarlos, pero no había ninguna
+// función que los guardara — exactamente el mismo tipo de "función a medias"
+// que el badge de pedidos web que se quedó sin conectar en Inicio.
 
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import {
@@ -19,6 +29,9 @@ type Ctx = {
   setTema: (v: string) => void;
   setAcento: (v: string) => void;
   setPack: (v: string) => void;
+  setDensidad: (v: string) => void;
+  setBordes: (v: string) => void;
+  setModoRendimiento: (v: boolean) => void;
   listo: boolean;
 };
 
@@ -50,6 +63,18 @@ export function TemaProvider({ children }: { children: ReactNode }) {
     setPack: (v) => {
       setPrefs((p) => ({ ...p, pack: v as any }));
       guardarPreferencia("pack_iconos", v);
+    },
+    setDensidad: (v) => {
+      setPrefs((p) => ({ ...p, densidad: v as any }));
+      guardarPreferencia("densidad", v);
+    },
+    setBordes: (v) => {
+      setPrefs((p) => ({ ...p, bordes: v as any }));
+      guardarPreferencia("bordes", v);
+    },
+    setModoRendimiento: (v) => {
+      setPrefs((p) => ({ ...p, modoRendimiento: v }));
+      guardarPreferencia("modo_rendimiento", v ? "1" : "0");
     },
   };
 

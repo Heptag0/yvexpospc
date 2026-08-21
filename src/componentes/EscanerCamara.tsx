@@ -12,6 +12,21 @@
 //
 // Solo se monta cuando está visible (el padre lo renderiza condicionalmente),
 // así nunca hay dos CameraView activas a la vez: al cerrar se desmonta todo.
+//
+// ---------------------------------------------------------------------------
+// POR QUÉ ESTE ARCHIVO NO SE MIGRÓ A LAS PRIMITIVAS DE ui.tsx
+// ---------------------------------------------------------------------------
+// El resto de la app usa la paleta del tema activo. Esta pantalla NO: es
+// negro fijo con texto blanco, sin importar si el tema es Papel o Grafito —
+// a propósito. Un visor de cámara mezclado con el tema claro se ve mal (el
+// contraste con la imagen en vivo se pierde) y ninguna app seria lo hace
+// así (WhatsApp, Instagram: la cámara siempre es inmersiva y oscura). Forzar
+// esto dentro de <Hoja> o de los tokens de tema habría sido ir en contra del
+// propio lenguaje de diseño, no a favor.
+//
+// Lo único que SÍ se corrige es el morado fantasma: T.turquesa (un segundo
+// acento que el usuario nunca eligió) pasa a T.acento, el mismo cambio que
+// se hizo en toda la app desde la Fase 1.
 
 import { useEffect, useRef, useState } from "react";
 import { Modal, View, Text, Pressable, StyleSheet } from "react-native";
@@ -115,7 +130,7 @@ export default function EscanerCamara({ modo, onCodigo, onCerrar, aviso }: Props
             {modo === "continuo" ? "Escanear al ticket" : "Escanear código"}
           </Text>
           <Pressable
-            style={[est.cabBtn, torch && { backgroundColor: T.acento, borderColor: T.acento }]}
+            style={[est.cabBtn, torch && { backgroundColor: T.acentoRelleno, borderColor: T.acentoRelleno }]}
             onPress={() => setTorch((v) => !v)}
             hitSlop={10}
           >
@@ -139,7 +154,7 @@ export default function EscanerCamara({ modo, onCodigo, onCerrar, aviso }: Props
             </Text>
             {permiso.canAskAgain && (
               <Pressable
-                style={[est.btnPermiso, { backgroundColor: T.acento }]}
+                style={[est.btnPermiso, { backgroundColor: T.acentoRelleno }]}
                 onPress={() => void pedirPermiso()}
               >
                 <Text style={[est.btnPermisoTxt, { color: T.acentoTexto }]}>Permitir cámara</Text>
@@ -201,10 +216,11 @@ export default function EscanerCamara({ modo, onCodigo, onCerrar, aviso }: Props
               </Pressable>
             </View>
 
-            {/* Aviso del último código leído (modo continuo) */}
+            {/* Aviso del último código leído (modo continuo).
+                Antes: T.turquesa/T.turquesaSuave — el morado fantasma. */}
             {modo === "continuo" && (aviso || ultimo) && (
-              <View style={[est.ultimoCaja, { backgroundColor: T.turquesaSuave, borderColor: T.turquesa }]}>
-                <Text style={[est.ultimoTxt, { color: T.turquesa }]} numberOfLines={2}>
+              <View style={[est.ultimoCaja, { backgroundColor: T.acentoSuave, borderColor: T.acento }]}>
+                <Text style={[est.ultimoTxt, { color: T.acento }]} numberOfLines={2}>
                   {aviso ?? `Código leído: ${ultimo}`}
                 </Text>
               </View>

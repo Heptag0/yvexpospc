@@ -6,9 +6,11 @@
 // Kits: al vender un kit se descuenta el stock de sus COMPONENTES.
 
 import { bd, uuid, ahoraISO } from "./db";
-import { asegurarUsuario, usuarioActivoId } from "./usuarios";
+import { asegurarUsuario, usuarioActivoId, usuarioActivo } from "./usuarios";
 import { encolar, sincronizarTrasVenta } from "./sync";
-import { leerConfig } from "./config";
+import { leerConfig, guardarConfig } from "./config";
+import { estadoCuenta } from "./nube";
+import { registrarCargoEnTx } from "./credito";
 import {
   lineasVentaWeb,
   metodoPagoVentaWeb,
@@ -24,23 +26,44 @@ export type Turno = {
 export type ItemCarrito = {
   producto_id: string;
   nombre: string;
+  /** Precio EFECTIVO al que se vende esta línea — puede venir rebajado
+   *  desde la pantalla de venta. */
   precio_centavos: number;
+  /** Precio de catálogo, SOLO presente si es distinto del efectivo (hubo
+   *  una rebaja en este ticket). Sirve para calcular
+   *  descuento_linea_centavos al cobrar — sin esto, la rebaja se aplicaba
+   *  pero nunca quedaba registrada como tal. */
+  precio_original_centavos?: number;
   cantidad: number;
   es_kit: boolean;
 };
 
-export type MetodoPago = "efectivo" | "tarjeta";
+export type MetodoPago = "efectivo" | "tarjeta" | "credito";
 
 // ---------------------------------------------------------------------------
 // Turnos de caja
 // ---------------------------------------------------------------------------
 
+/** Antes: "el turno abierto más reciente, sin importar de quién". Si una
+ *  cuenta está vinculada, el móvil SÍ baja caja_sesiones de otros
+ *  dispositivos por sync (otra caja, el PC) — con eso, "más reciente" podía
+ *  ser el turno de OTRO dispositivo, y un cajero terminaba vendiendo o
+ *  cerrando la caja de otra máquina sin saberlo. El PC ya filtra por
+ *  dispositivo_id en sesion_abierta(); esto pone al móvil al parejo.
+ *
+ *  Turnos con dispositivo_id NULL (locales de antes de esta columna, o
+ *  abiertos antes de vincular cuenta — dispositivoId no existe hasta ese
+ *  momento, ver nube.ts) se siguen reconociendo como propios: son los
+ *  únicos que pueden existir sin ese dato, nunca pueden ser "de otro". */
 export async function turnoActivo(): Promise<Turno | null> {
   const db = await bd();
+  const cuenta = await estadoCuenta();
   const fila = await db.getFirstAsync<Turno>(
     `SELECT id, fondo_inicial_centavos, abierta_en
-     FROM caja_sesiones WHERE estado = 'abierta'
-     ORDER BY abierta_en DESC LIMIT 1`
+     FROM caja_sesiones
+     WHERE estado = 'abierta' AND (dispositivo_id = ? OR dispositivo_id IS NULL)
+     ORDER BY abierta_en DESC LIMIT 1`,
+    [cuenta.dispositivoId]
   );
   return fila ?? null;
 }
@@ -55,16 +78,25 @@ export async function abrirTurno(fondoCentavos: number): Promise<Turno> {
   const usuario = await asegurarUsuario();
   if (!usuario) throw new Error("Primero configura tu usuario desde la pantalla de bienvenida.");
 
+  // Sin cuenta vinculada, dispositivoId es null — y así se queda guardado
+  // (NULL), que es exactamente lo que turnoActivo() ya reconoce como
+  // "propio". No hace falta inventar un id local: el problema que esta
+  // columna resuelve solo puede ocurrir con cuenta vinculada (es cuando
+  // empiezan a bajar turnos de otros dispositivos).
+  const cuenta = await estadoCuenta();
   const id = uuid();
   const ahora = ahoraISO();
   await db.runAsync(
     `INSERT INTO caja_sesiones
-      (id, usuario_pos_id, fondo_inicial_centavos, abierta_en, estado, creado_en, actualizado_en)
-     VALUES (?,?,?,?, 'abierta', ?, ?)`,
-    [id, usuario.id, fondoCentavos, ahora, ahora, ahora]
+      (id, usuario_pos_id, fondo_inicial_centavos, abierta_en, estado, dispositivo_id, creado_en, actualizado_en)
+     VALUES (?,?,?,?, 'abierta', ?, ?, ?)`,
+    [id, usuario.id, fondoCentavos, ahora, cuenta.dispositivoId, ahora, ahora]
   );
 
   // A la cola de subida: la nube exige el turno ANTES que sus ventas (FK).
+  // Sin dispositivo_id en el payload a propósito: el servidor lo inyecta él
+  // mismo desde el dispositivo autenticado (sync.py, "inyecta_dispositivo"),
+  // ignora lo que mande el cliente — mandarlo aquí no cambiaría nada.
   await encolar("caja_sesiones", id, {
     id,
     usuario_pos_id: usuario.id,
@@ -78,8 +110,31 @@ export async function abrirTurno(fondoCentavos: number): Promise<Turno> {
   return { id, fondo_inicial_centavos: fondoCentavos, abierta_en: ahora };
 }
 
+/** Cierra el turno — pero antes valida QUIÉN lo está cerrando. Antes: sin
+ *  ninguna validación, cualquier usuario logueado en el dispositivo podía
+ *  cerrar el turno que abrió otro compañero, aunque `dispositivo_id` ya
+ *  evita que se mezcle con turnos de OTROS aparatos. Dentro del MISMO
+ *  teléfono, el corte de caja es un momento de responsabilidad — solo
+ *  quien lo abrió, un gerente o el dueño pueden cerrarlo. Los turnos sin
+ *  usuario_pos_id (datos de antes de que existiera esta columna) se dejan
+ *  pasar: no hay a quién comparar. */
 export async function cerrarTurno(turnoId: string): Promise<void> {
   const db = await bd();
+  const fila = await db.getFirstAsync<{ usuario_pos_id: string | null }>(
+    "SELECT usuario_pos_id FROM caja_sesiones WHERE id = ?",
+    [turnoId]
+  );
+  if (!fila) throw new Error("No se encontró el turno.");
+
+  const activo = await usuarioActivo();
+  const esSupervisor = activo?.rol === "dueno" || activo?.rol === "gerente";
+  const esQuienLoAbrio = !fila.usuario_pos_id || activo?.id === fila.usuario_pos_id;
+  if (!esQuienLoAbrio && !esSupervisor) {
+    throw new Error(
+      "Este turno lo abrió otro usuario. Solo quien lo abrió, un gerente o el dueño pueden cerrarlo."
+    );
+  }
+
   const ahora = ahoraISO();
   await db.runAsync(
     `UPDATE caja_sesiones SET estado = 'cerrada', cerrada_en = ?, actualizado_en = ? WHERE id = ?`,
@@ -213,6 +268,175 @@ export async function corteTurno(turno: Turno): Promise<Corte> {
 }
 
 // ---------------------------------------------------------------------------
+// Conteo a ciegas del corte + bolsa de sobrante/faltante
+// ---------------------------------------------------------------------------
+//
+// OPCIONAL, apagado por defecto (config "conteo_ciego_activo", mismo patrón
+// que "sync_auto"). Con el conteo a ciegas prendido, la pantalla del corte
+// NO muestra el efectivo esperado hasta que el cajero captura lo que contó
+// físicamente — así el conteo no se "ajusta" viendo primero la respuesta.
+//
+// La diferencia (positiva = sobra, negativa = falta) puede registrarse en
+// bolsa_movimientos: UNA sola bolsa del negocio, no una por cajero — cada
+// fila queda atribuida al usuario que cerró ESE turno, para que el dueño
+// pueda ver si alguien en particular acumula faltantes sin tener que llevar
+// una tabla aparte por persona.
+//
+// SINCRONIZACIÓN — corregido: se pensó primero que todo esto sería
+// LOCAL-ONLY, pero el MAPA de sync.py YA esperaba
+// total_efectivo_esperado_centavos / total_efectivo_contado_centavos /
+// diferencia_centavos en caja_sesiones (el backend ya tenía soporte para
+// algo muy parecido). Las columnas locales se renombraron para coincidir
+// (migración v24 en db.ts) y registrarConteoTurno() ahora sí encola. La
+// bolsa en sí (bolsa_movimientos) sigue siendo LOCAL-ONLY: esa tabla no
+// existe en el MAPA del backend — mismo criterio que proveedores/clientes
+// antes de tener soporte del servidor.
+
+const CLAVE_CONTEO_CIEGO = "conteo_ciego_activo";
+
+/** ¿El corte de turno debe ocultar el efectivo esperado hasta que el cajero
+ *  capture lo que contó? Apagado por defecto — es una decisión del dueño,
+ *  no algo que se activa solo. */
+export async function leerConteoCiegoActivo(): Promise<boolean> {
+  const v = await leerConfig(CLAVE_CONTEO_CIEGO);
+  return v === "1";
+}
+
+export async function guardarConteoCiegoActivo(activo: boolean): Promise<void> {
+  await guardarConfig(CLAVE_CONTEO_CIEGO, activo ? "1" : "0");
+}
+
+export type ResultadoConteo = {
+  /** Positivo = sobra, negativo = falta, 0 = cuadró exacto. */
+  diferenciaCentavos: number;
+};
+
+/** Registra lo que el cajero contó físicamente en el cajón y calcula la
+ *  diferencia contra el efectivo esperado (misma fórmula de corteTurno(),
+ *  reutilizada aquí en vez de repetida: si el día de mañana cambia cómo se
+ *  calcula el esperado, no hay dos lugares que recordar actualizar).
+ *
+ *  SÍ SINCRONIZA (a diferencia de como se pensó al principio): el MAPA de
+ *  sync.py ya esperaba total_efectivo_esperado_centavos /
+ *  total_efectivo_contado_centavos / diferencia_centavos en caja_sesiones
+ *  — el backend ya tenía soporte para esto, solo con otros nombres. Se
+ *  renombraron las columnas locales para coincidir (migración v24 en
+ *  db.ts) y ahora si se encola. La bolsa en sí (bolsa_movimientos) sigue
+ *  siendo local: esa tabla no existe en el MAPA del backend. */
+export async function registrarConteoTurno(
+  turno: Turno,
+  contadoCentavos: number
+): Promise<ResultadoConteo> {
+  if (contadoCentavos < 0) throw new Error("El monto contado no puede ser negativo.");
+  const corte = await corteTurno(turno);
+  const diferencia = contadoCentavos - corte.efectivo_esperado_centavos;
+
+  const db = await bd();
+  const ahora = ahoraISO();
+  await db.runAsync(
+    `UPDATE caja_sesiones
+        SET total_efectivo_esperado_centavos = ?,
+            total_efectivo_contado_centavos = ?,
+            diferencia_centavos = ?,
+            actualizado_en = ?
+      WHERE id = ?`,
+    [corte.efectivo_esperado_centavos, contadoCentavos, diferencia, ahora, turno.id]
+  );
+  // Mismo patrón que cerrarTurno(): update parcial, solo las columnas que
+  // cambiaron. sync.py solo escribe las que están en su "update_cols" para
+  // esta entidad, así que enviar de más no haría daño, pero tampoco hace
+  // falta — esto ya coincide exactamente con lo que el backend acepta.
+  await encolar("caja_sesiones", turno.id, {
+    id: turno.id,
+    total_efectivo_esperado_centavos: corte.efectivo_esperado_centavos,
+    total_efectivo_contado_centavos: contadoCentavos,
+    diferencia_centavos: diferencia,
+    actualizado_en: ahora,
+  }, "update");
+
+  return { diferenciaCentavos: diferencia };
+}
+
+/** Registra la diferencia de un conteo en la bolsa del negocio, atribuida al
+ *  usuario ACTIVO (quien está cerrando el turno). Si la diferencia es 0
+ *  (cuadró exacto), no se crea fila: no hay nada que "aportar" a la bolsa. */
+export async function registrarMovimientoBolsa(
+  turnoId: string,
+  diferenciaCentavos: number
+): Promise<void> {
+  if (diferenciaCentavos === 0) return;
+  const db = await bd();
+  const usuario = await usuarioActivoId();
+  await db.runAsync(
+    `INSERT INTO bolsa_movimientos
+       (id, caja_sesion_id, usuario_pos_id, diferencia_centavos, creado_en)
+     VALUES (?,?,?,?,?)`,
+    [uuid(), turnoId, usuario, diferenciaCentavos, ahoraISO()]
+  );
+}
+
+/** Saldo vivo de la bolsa: positivo = a favor del negocio, negativo = en
+ *  contra (más faltantes acumulados que sobrantes). */
+export async function saldoBolsa(): Promise<number> {
+  const db = await bd();
+  const f = await db.getFirstAsync<{ s: number }>(
+    "SELECT COALESCE(SUM(diferencia_centavos),0) AS s FROM bolsa_movimientos"
+  );
+  return f?.s ?? 0;
+}
+
+export type MovimientoBolsa = {
+  id: string;
+  usuarioPosId: string | null;
+  usuarioNombre: string;
+  diferenciaCentavos: number;
+  cajaSesionId: string;
+  creadoEn: string;
+};
+
+/** Historial completo de la bolsa, más reciente primero. */
+export async function historialBolsa(limite = 100): Promise<MovimientoBolsa[]> {
+  const db = await bd();
+  return db.getAllAsync<MovimientoBolsa>(
+    `SELECT b.id AS id,
+            b.usuario_pos_id AS usuarioPosId,
+            COALESCE(u.nombre, 'Usuario eliminado') AS usuarioNombre,
+            b.diferencia_centavos AS diferenciaCentavos,
+            b.caja_sesion_id AS cajaSesionId,
+            b.creado_en AS creadoEn
+       FROM bolsa_movimientos b
+       LEFT JOIN usuarios_pos u ON u.id = b.usuario_pos_id
+      ORDER BY b.creado_en DESC
+      LIMIT ?`,
+    [limite]
+  );
+}
+
+export type ResumenUsuarioBolsa = {
+  usuarioPosId: string | null;
+  usuarioNombre: string;
+  totalCentavos: number;
+  eventos: number;
+};
+
+/** Resumen por usuario, ordenado del que MÁS FALTA acumula al que más
+ *  sobra — es lo que responde directamente "¿quién me está fallando?" sin
+ *  que el dueño tenga que sumar el historial a mano. */
+export async function resumenBolsaPorUsuario(): Promise<ResumenUsuarioBolsa[]> {
+  const db = await bd();
+  return db.getAllAsync<ResumenUsuarioBolsa>(
+    `SELECT b.usuario_pos_id AS usuarioPosId,
+            COALESCE(u.nombre, 'Usuario eliminado') AS usuarioNombre,
+            SUM(b.diferencia_centavos) AS totalCentavos,
+            COUNT(*) AS eventos
+       FROM bolsa_movimientos b
+       LEFT JOIN usuarios_pos u ON u.id = b.usuario_pos_id
+      GROUP BY b.usuario_pos_id
+      ORDER BY totalCentavos ASC`
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Cobro (transaccional)
 // ---------------------------------------------------------------------------
 
@@ -257,6 +481,10 @@ export async function cobrar(
   );
   const clienteId = opciones?.clienteId ?? null;
   const total = subtotal - descuento;
+  // Crédito exige un cliente — no se puede vender "a crédito" sin saber a
+  // quién se le va a cobrar después.
+  if (metodo === "credito" && !clienteId)
+    throw new Error("Elige un cliente para vender a crédito.");
   if (metodo === "efectivo" && pagadoCentavos < total)
     throw new Error("El efectivo recibido no alcanza para el total.");
   const cambio = metodo === "efectivo" ? pagadoCentavos - total : 0;
@@ -286,6 +514,17 @@ export async function cobrar(
 
     for (const it of items) {
       const totalLinea = Math.round(it.precio_centavos * it.cantidad);
+      // Rebaja por línea (precio cambiado en pantalla al vender, no un
+      // descuento del catálogo): antes esta columna siempre se guardaba en
+      // 0, aunque el cajero hubiera bajado el precio de la línea — la
+      // rebaja SE APLICABA (precio_centavos ya la traía) pero nunca quedaba
+      // registrada como tal, así que no había forma de reportar "cuánto se
+      // regaló en rebajas". precio_unitario_centavos sigue siendo el precio
+      // efectivo cobrado (no cambia nada de lo que ya lee el ticket).
+      const descuentoLinea =
+        it.precio_original_centavos && it.precio_original_centavos > it.precio_centavos
+          ? Math.round((it.precio_original_centavos - it.precio_centavos) * it.cantidad)
+          : 0;
       // Costo AL MOMENTO de vender, no el que tenga el producto después.
       // Se lee fresco de la base (no se confía en lo que traiga el carrito
       // del frontend para el dinero — mismo criterio que el PC).
@@ -298,8 +537,8 @@ export async function cobrar(
         `INSERT INTO venta_lineas
           (id, venta_id, producto_id, nombre_producto, cantidad,
            precio_unitario_centavos, costo_unitario_centavos, descuento_linea_centavos, total_linea_centavos, creado_en)
-         VALUES (?,?,?,?,?,?,?,0,?,?)`,
-        [uuid(), ventaId, it.producto_id, it.nombre, it.cantidad, it.precio_centavos, costoUnitario, totalLinea, ahora]
+         VALUES (?,?,?,?,?,?,?,?,?,?)`,
+        [uuid(), ventaId, it.producto_id, it.nombre, it.cantidad, it.precio_centavos, costoUnitario, descuentoLinea, totalLinea, ahora]
       );
 
       if (it.es_kit) {
@@ -329,6 +568,13 @@ export async function cobrar(
        VALUES (?,?,?,?,?)`,
       [uuid(), ventaId, metodo, total, ahora]
     );
+
+    // Crédito: sube el saldo del cliente DENTRO de esta misma transacción —
+    // la venta y el cargo nacen juntos o no nacen, igual que
+    // registrar_cargo_en_tx del PC (nunca una llamada suelta aparte).
+    if (metodo === "credito" && clienteId) {
+      await registrarCargoEnTx(clienteId, total, ventaId, usuario.id, turno.id);
+    }
 
     // Guardar el folio para devolverlo fuera de la transacción.
     (globalThis as any).__ultimoFolio = folio;

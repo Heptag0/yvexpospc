@@ -84,22 +84,47 @@ export async function listarProductos(opciones?: {
   filtro?: string;
   categoriaId?: string | null;
   soloStockBajo?: boolean;
+  // Subconjunto de "stock bajo" (bajo = stock <= mínimo; negativo = stock <
+  // 0). Alertas distintas para el dueño: una es "hay que resurtir pronto",
+  // la otra es "algo no cuadra en el conteo" — merecen filtros separados
+  // aunque casi siempre un producto en negativo también cuente como bajo.
+  soloEnNegativo?: boolean;
 }): Promise<ProductoLista[]> {
   const db = await bd();
   const cond: string[] = ["p.eliminado = 0"];
   const args: any[] = [];
 
-  if (opciones?.filtro?.trim()) {
+  const filtro = opciones?.filtro?.trim();
+  if (filtro) {
     cond.push("(p.nombre LIKE ? OR p.codigo_barras LIKE ?)");
-    const like = `%${opciones.filtro.trim()}%`;
+    const like = `%${filtro}%`;
     args.push(like, like);
   }
   if (opciones?.categoriaId) {
     cond.push("p.categoria_id = ?");
     args.push(opciones.categoriaId);
   }
-  if (opciones?.soloStockBajo) {
+  if (opciones?.soloEnNegativo) {
+    cond.push("p.es_kit = 0 AND p.controla_stock = 1 AND p.stock < 0");
+  } else if (opciones?.soloStockBajo) {
     cond.push("p.es_kit = 0 AND p.controla_stock = 1 AND p.stock <= p.stock_minimo");
+  }
+
+  // Antes: siempre alfabético, incluso buscando. Escribir "coca" enterraba
+  // "Coca-Cola" bajo cualquier producto que la tuviera mencionada más tarde
+  // en el nombre, solo por orden de letras. Con texto de búsqueda: primero
+  // coincidencia exacta, luego "empieza con", luego el resto — alfabético
+  // dentro de cada grupo. Sin texto de búsqueda (navegando el catálogo
+  // completo), no hay noción de relevancia: alfabético como siempre.
+  let orderBy = "p.nombre COLLATE NOCASE";
+  const ordArgs: any[] = [];
+  if (filtro) {
+    orderBy = `CASE
+        WHEN p.nombre COLLATE NOCASE = ? THEN 0
+        WHEN p.nombre LIKE ? THEN 1
+        ELSE 2
+      END, p.nombre COLLATE NOCASE`;
+    ordArgs.push(filtro, `${filtro}%`);
   }
 
   const filas = await db.getAllAsync<ProductoLista>(
@@ -108,8 +133,8 @@ export async function listarProductos(opciones?: {
      FROM productos p
      LEFT JOIN categorias c ON c.id = p.categoria_id
      WHERE ${cond.join(" AND ")}
-     ORDER BY p.nombre COLLATE NOCASE`,
-    args
+     ORDER BY ${orderBy}`,
+    [...args, ...ordArgs]
   );
 
   const kits = filas.filter((f) => f.es_kit === 1);
@@ -217,31 +242,38 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
 
   const id = uuid();
   const ahora = ahoraISO();
-  await db.runAsync(
-    `INSERT INTO productos
-      (id, codigo_barras, nombre, categoria_id, precio_venta_centavos,
-       costo_centavos, precio_mayoreo_centavos, controla_stock, stock,
-       stock_minimo, unidad, es_kit, favorito, imagen_uri, activo, eliminado, creado_en, actualizado_en)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
-    [
-      id, codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
-      d.costo_centavos, d.precio_mayoreo_centavos,
-      d.es_kit ? 0 : d.controla_stock ? 1 : 0,
-      d.es_kit ? 0 : d.stock,
-      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
-      d.imagen_uri, ahora, ahora,
-    ]
-  );
-  if (d.es_kit) await guardarComponentes(id, d.componentes);
+  // Antes: INSERT + guardarComponentes() (que a su vez hace DELETE + varios
+  // INSERT) eran llamadas sueltas, sin transacción. Si algo fallaba entre
+  // medio, un kit podía quedar creado con sus componentes a medias — o sin
+  // ninguno. aplicarResurtido() ya usaba withTransactionAsync
+  // correctamente; crearProducto y editarProducto no lo hacían.
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT INTO productos
+        (id, codigo_barras, nombre, categoria_id, precio_venta_centavos,
+         costo_centavos, precio_mayoreo_centavos, controla_stock, stock,
+         stock_minimo, unidad, es_kit, favorito, imagen_uri, activo, eliminado, creado_en, actualizado_en)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
+      [
+        id, codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
+        d.costo_centavos, d.precio_mayoreo_centavos,
+        d.es_kit ? 0 : d.controla_stock ? 1 : 0,
+        d.es_kit ? 0 : d.stock,
+        d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
+        d.imagen_uri, ahora, ahora,
+      ]
+    );
+    if (d.es_kit) await guardarComponentes(id, d.componentes);
 
-  await encolar("productos", id, {
-    id, codigo_barras: codigo, nombre: d.nombre.trim(), categoria_id: d.categoria_id,
-    precio_venta_centavos: d.precio_venta_centavos, costo_centavos: d.costo_centavos,
-    precio_mayoreo_centavos: d.precio_mayoreo_centavos, cantidad_mayoreo: null,
-    iva_tasa: 0, controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
-    stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-    favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, creado_en: ahora,
-    actualizado_en: ahora,
+    await encolar("productos", id, {
+      id, codigo_barras: codigo, nombre: d.nombre.trim(), categoria_id: d.categoria_id,
+      precio_venta_centavos: d.precio_venta_centavos, costo_centavos: d.costo_centavos,
+      precio_mayoreo_centavos: d.precio_mayoreo_centavos, cantidad_mayoreo: null,
+      iva_tasa: 0, controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
+      stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
+      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, creado_en: ahora,
+      actualizado_en: ahora,
+    });
   });
   return id;
 }
@@ -253,34 +285,37 @@ export async function editarProducto(d: DatosProducto): Promise<void> {
   const codigo = normalizarCodigo(d.codigo_barras);
   if (codigo) await verificarCodigoUnico(codigo, d.id);
 
+  const idProd = d.id;
   const ahoraEd = ahoraISO();
-  await db.runAsync(
-    `UPDATE productos SET
-      codigo_barras = ?, nombre = ?, categoria_id = ?, precio_venta_centavos = ?,
-      costo_centavos = ?, precio_mayoreo_centavos = ?, controla_stock = ?,
-      stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, favorito = ?, imagen_uri = ?, actualizado_en = ?
-     WHERE id = ?`,
-    [
-      codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
-      d.costo_centavos, d.precio_mayoreo_centavos,
-      d.es_kit ? 0 : d.controla_stock ? 1 : 0,
-      d.es_kit ? 0 : d.stock,
-      d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
-      d.imagen_uri, ahoraEd, d.id,
-    ]
-  );
-  if (d.es_kit) await guardarComponentes(d.id, d.componentes);
-  else await db.runAsync("DELETE FROM kit_componentes WHERE kit_id = ?", [d.id]);
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `UPDATE productos SET
+        codigo_barras = ?, nombre = ?, categoria_id = ?, precio_venta_centavos = ?,
+        costo_centavos = ?, precio_mayoreo_centavos = ?, controla_stock = ?,
+        stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, favorito = ?, imagen_uri = ?, actualizado_en = ?
+       WHERE id = ?`,
+      [
+        codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
+        d.costo_centavos, d.precio_mayoreo_centavos,
+        d.es_kit ? 0 : d.controla_stock ? 1 : 0,
+        d.es_kit ? 0 : d.stock,
+        d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
+        d.imagen_uri, ahoraEd, idProd,
+      ]
+    );
+    if (d.es_kit) await guardarComponentes(idProd, d.componentes);
+    else await db.runAsync("DELETE FROM kit_componentes WHERE kit_id = ?", [idProd]);
 
-  await encolar("productos", d.id, {
-    id: d.id, codigo_barras: codigo, nombre: d.nombre.trim(),
-    categoria_id: d.categoria_id, precio_venta_centavos: d.precio_venta_centavos,
-    costo_centavos: d.costo_centavos, precio_mayoreo_centavos: d.precio_mayoreo_centavos,
-    cantidad_mayoreo: null, iva_tasa: 0,
-    controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
-    stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-    favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, actualizado_en: ahoraEd,
-  }, "update");
+    await encolar("productos", idProd, {
+      id: idProd, codigo_barras: codigo, nombre: d.nombre.trim(),
+      categoria_id: d.categoria_id, precio_venta_centavos: d.precio_venta_centavos,
+      costo_centavos: d.costo_centavos, precio_mayoreo_centavos: d.precio_mayoreo_centavos,
+      cantidad_mayoreo: null, iva_tasa: 0,
+      controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
+      stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
+      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, actualizado_en: ahoraEd,
+    }, "update");
+  });
 }
 
 export async function eliminarProducto(id: string): Promise<void> {
@@ -310,23 +345,30 @@ export async function ajustarStock(
   motivo: MotivoAjuste
 ): Promise<void> {
   const db = await bd();
-  const p = await db.getFirstAsync<{ stock: number }>(
-    "SELECT stock FROM productos WHERE id = ?", [productoId]
-  );
-  if (!p) throw new Error("Producto no encontrado.");
-  const ahora = ahoraISO();
-  await db.runAsync(
-    "UPDATE productos SET stock = ?, actualizado_en = ? WHERE id = ?",
-    [nuevoStock, ahora, productoId]
-  );
-  await db.runAsync(
-    `INSERT INTO ajustes_inventario (id, producto_id, stock_antes, stock_despues, motivo, creado_en)
-     VALUES (?,?,?,?,?,?)`,
-    [uuid(), productoId, p.stock, nuevoStock, motivo, ahora]
-  );
-  await encolar("productos", productoId, {
-    id: productoId, stock: nuevoStock, actualizado_en: ahora,
-  }, "update");
+  // Antes: el UPDATE de stock y el INSERT del rastro en ajustes_inventario
+  // eran dos llamadas sueltas. El propio encabezado de este archivo dice
+  // "todo ajuste de stock deja rastro" — sin transacción, un fallo entre
+  // las dos dejaba un cambio de stock SIN rastro, justo lo que esa regla
+  // dice que nunca debería pasar.
+  await db.withTransactionAsync(async () => {
+    const p = await db.getFirstAsync<{ stock: number }>(
+      "SELECT stock FROM productos WHERE id = ?", [productoId]
+    );
+    if (!p) throw new Error("Producto no encontrado.");
+    const ahora = ahoraISO();
+    await db.runAsync(
+      "UPDATE productos SET stock = ?, actualizado_en = ? WHERE id = ?",
+      [nuevoStock, ahora, productoId]
+    );
+    await db.runAsync(
+      `INSERT INTO ajustes_inventario (id, producto_id, stock_antes, stock_despues, motivo, creado_en)
+       VALUES (?,?,?,?,?,?)`,
+      [uuid(), productoId, p.stock, nuevoStock, motivo, ahora]
+    );
+    await encolar("productos", productoId, {
+      id: productoId, stock: nuevoStock, actualizado_en: ahora,
+    }, "update");
+  });
 }
 
 export async function historialAjustes(productoId: string, limite = 10) {
@@ -528,6 +570,11 @@ export async function eliminarCategoria(id: string): Promise<void> {
 export type MetricasInventario = {
   total_productos: number;
   valor_costo_centavos: number;
+  // Lo mismo que valor_costo_centavos pero a precio de venta: cuánto
+  // entraría si se vendiera TODO el inventario tal como está hoy. Ambas
+  // cifras conviven en el mismo dato porque la pantalla las intercambia
+  // sin volver a consultar la base.
+  valor_precio_centavos: number;
   margen_promedio: number | null;
   stock_bajo: number;
   en_negativo: number;
@@ -536,11 +583,13 @@ export type MetricasInventario = {
 export async function metricasInventario(): Promise<MetricasInventario> {
   const db = await bd();
   const base = await db.getFirstAsync<{
-    total: number; valor: number; bajo: number; neg: number;
+    total: number; valor: number; valorVenta: number; bajo: number; neg: number;
   }>(`
     SELECT COUNT(*) AS total,
       COALESCE(SUM(CASE WHEN es_kit = 0 AND controla_stock = 1
         THEN COALESCE(costo_centavos,0) * stock ELSE 0 END), 0) AS valor,
+      COALESCE(SUM(CASE WHEN es_kit = 0 AND controla_stock = 1
+        THEN precio_venta_centavos * stock ELSE 0 END), 0) AS valorVenta,
       COALESCE(SUM(CASE WHEN es_kit = 0 AND controla_stock = 1 AND stock <= stock_minimo
         THEN 1 ELSE 0 END), 0) AS bajo,
       COALESCE(SUM(CASE WHEN es_kit = 0 AND controla_stock = 1 AND stock < 0
@@ -556,6 +605,7 @@ export async function metricasInventario(): Promise<MetricasInventario> {
   return {
     total_productos: base?.total ?? 0,
     valor_costo_centavos: Math.round(base?.valor ?? 0),
+    valor_precio_centavos: Math.round(base?.valorVenta ?? 0),
     margen_promedio: margen?.m ?? null,
     stock_bajo: base?.bajo ?? 0,
     en_negativo: base?.neg ?? 0,
