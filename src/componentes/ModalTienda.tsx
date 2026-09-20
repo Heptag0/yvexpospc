@@ -60,13 +60,16 @@ import {
   FlatList,
   ScrollView,
   Switch,
-  KeyboardAvoidingView,
-  Platform,
   Share,
   Image,
   ActivityIndicator,
   BackHandler,
 } from "react-native";
+// El KeyboardAvoidingView viene de `react-native-keyboard-controller`, no de
+// React Native: ver el porqué en ui.tsx. Misma API, mismo "padding", pero
+// construido para `edgeToEdgeEnabled`, donde la ventana ya no se redimensiona
+// sola al abrirse el teclado.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import * as Linking from "expo-linking";
 import * as ImagePicker from "expo-image-picker";
 import { WebView as WebViewNativo } from "react-native-webview";
@@ -1170,18 +1173,22 @@ export default function ModalTienda({
           onCambio={(v) => actualizarCfg({ pagoEfectivo: v })}
         />
 
+        <FilaSwitch
+          T={T}
+          titulo="Tarjeta al recibir"
+          meta="Tu cliente paga con tu terminal al recoger o al recibir su pedido."
+          valor={cfg.pagoTerminal}
+          onCambio={(v) => actualizarCfg({ pagoTerminal: v })}
+        />
+
         <Campo
-          label="Link de pago en línea (opcional)"
-          ayuda={
-            cfg.linkPago.trim() && !linkPagoValido(cfg.linkPago)
-              ? "No parece una dirección válida: debe empezar con https://"
-              : "Tu link de Mercado Pago, transferencia u otro. Debe empezar con https://"
-          }
+          label="Link de pago en línea — en desarrollo"
+          ayuda="Esta función llega completa (con una pasarela real) después del lanzamiento. Lo que ya tengas guardado se conserva, pero por ahora no se le muestra a tus clientes."
         >
           <TextInput
-            style={estiloInput}
+            style={[estiloInput, { opacity: 0.5 }]}
             value={cfg.linkPago}
-            onChangeText={(v) => actualizarCfg({ linkPago: v.trim() })}
+            editable={false}
             placeholder="https://…"
             placeholderTextColor={T.textoTenue}
             autoCapitalize="none"
@@ -1414,7 +1421,19 @@ export default function ModalTienda({
       <SafeAreaView style={est.raiz} edges={["top"]}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          // "padding" en las DOS plataformas.
+              //
+              // Antes: Platform.OS === "ios" ? "padding" : undefined. En
+              // Android eso era literalmente NINGUNA evitación de teclado. Era
+              // correcto cuando `softwareKeyboardLayoutMode: "resize"`
+              // redimensionaba la ventana, pero con `edgeToEdgeEnabled: true`
+              // la ventana ya no se encoge: la app dibuja por debajo del
+              // teclado, y los campos quedaban tapados.
+              //
+              // NO "height", que es la otra tentación: anima la altura del
+              // contenedor y pelea con la animación del sistema, así que el
+              // contenido rebota al cerrarse el teclado. Ya se probó.
+              behavior="padding"
         >
           <CabeceraModal
             titulo={vista === "productos" ? "Productos en tu tienda" : "Mi tienda en línea"}

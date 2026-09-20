@@ -71,8 +71,12 @@ export type DatosCotizacion = {
 
 async function siguienteFolio(): Promise<number> {
   const db = await bd();
+  // El MAX excluye las cotizaciones BAJADAS de otras cajas. Las cotizaciones
+  // SÍ sincronizan, así que sin este filtro el folio saltaría a la serie del
+  // PC en cuanto se sincronice — el mismo fallo que tenía el folio de ventas
+  // en venta.ts. La columna `origen` se añadió para esto (migración v30).
   const r = await db.getFirstAsync<{ f: number }>(
-    "SELECT COALESCE(MAX(folio), 0) + 1 AS f FROM cotizaciones"
+    "SELECT COALESCE(MAX(folio), 0) + 1 AS f FROM cotizaciones WHERE origen <> 'nube'"
   );
   return r?.f ?? 1;
 }
@@ -101,6 +105,11 @@ export async function crearCotizacion(d: DatosCotizacion): Promise<CotizacionCon
   const ts = ahoraISO();
   const folio = await siguienteFolio();
 
+  // Cabecera, líneas y encolados en UNA transacción. Sueltos, un fallo entre
+  // la cabecera y las líneas dejaba una cotización VACÍA con un total que no
+  // corresponde a nada — y el cliente ya vio ese precio. El PC tenía el mismo
+  // fallo (cotizaciones.rs::crear) y se corrigió igual.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `INSERT INTO cotizaciones
        (id, folio, cliente_nombre, cliente_telefono, cliente_correo, notas,
@@ -144,7 +153,10 @@ export async function crearCotizacion(d: DatosCotizacion): Promise<CotizacionCon
     valida_hasta: d.validaHasta || null, estado: "abierta", venta_id: null,
     eliminado: 0, creado_en: ts, actualizado_en: ts,
   });
+  });
 
+  // La lectura va FUERA de la transacción, ya confirmada: dentro leería un
+  // estado que todavía no existe para el resto de la conexión.
   const creada = await obtenerCotizacion(id);
   if (!creada) throw new Error("No se pudo leer la cotización recién creada.");
   return creada;

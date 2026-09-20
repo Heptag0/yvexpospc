@@ -26,6 +26,16 @@
 // LOCAL-ONLY (v1). Dinero SIEMPRE en centavos enteros.
 
 import { bd, uuid, ahoraISO } from "./db";
+import { exigirPermiso } from "./permisos";
+
+// ⚠️ TODO este módulo exige el permiso "verFinanzas", que es SOLO DUEÑO.
+//
+// No es dinero del negocio: son los DOS libros, y uno de ellos es la vida
+// privada del dueño — la renta de su casa, su despensa, lo que se retira para
+// vivir. Un cajero con la tablet lo tenía todo a la vista.
+//
+// El guarda va en CADA función, no solo en la pantalla: si mañana otro modal
+// llama a `resumenFinanzas()` por su cuenta, sigue protegido.
 import { registrarMovimientoCaja } from "./venta";
 
 export type Ambito = "negocio" | "personal";
@@ -201,6 +211,7 @@ async function costoVendido(desde: string, hasta: string): Promise<number> {
  *    - categoría "retiro" en el negocio → ingreso espejo en el libro personal
  *  Una sola captura del dueño, las verdades correctas en cada lado. */
 export async function registrarGasto(d: DatosGasto): Promise<string> {
+  await exigirPermiso("verFinanzas");
   const concepto = d.concepto.trim();
   if (!concepto) throw new Error("Escribe en qué se gastó.");
   if (d.montoCentavos <= 0) throw new Error("El monto debe ser mayor a cero.");
@@ -254,6 +265,7 @@ export async function registrarGasto(d: DatosGasto): Promise<string> {
  *  el mismo dinero. La salida de caja NO se toca: ese efectivo ya salió del
  *  cajón físicamente y el corte de ese turno ya se calculó con ella. */
 export async function eliminarGasto(id: string): Promise<void> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   const ts = ahoraISO();
   const g = await db.getFirstAsync<{ ingreso_espejo_id: string | null }>(
@@ -273,6 +285,7 @@ export async function eliminarGasto(id: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function registrarIngreso(d: DatosIngreso): Promise<string> {
+  await exigirPermiso("verFinanzas");
   const concepto = d.concepto.trim();
   if (!concepto) throw new Error("Escribe de dónde vino el dinero.");
   if (d.montoCentavos <= 0) throw new Error("El monto debe ser mayor a cero.");
@@ -290,6 +303,7 @@ export async function registrarIngreso(d: DatosIngreso): Promise<string> {
 }
 
 export async function eliminarIngreso(id: string): Promise<void> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   await db.runAsync("UPDATE ingresos SET eliminado = 1, actualizado_en = ? WHERE id = ?", [ahoraISO(), id]);
 }
@@ -300,6 +314,7 @@ export async function listarMovimientos(
   desde: string,
   hasta: string
 ): Promise<Movimiento[]> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   const gastos = await db.getAllAsync<any>(
     `SELECT id, concepto, categoria, monto_centavos, fecha, notas FROM gastos
@@ -324,6 +339,7 @@ export async function listarMovimientos(
 // ---------------------------------------------------------------------------
 
 export async function crearFijo(d: DatosGastoFijo): Promise<string> {
+  await exigirPermiso("verFinanzas");
   const concepto = d.concepto.trim();
   if (!concepto) throw new Error("Escribe el nombre del gasto fijo.");
   if (d.montoCentavos <= 0) throw new Error("El monto debe ser mayor a cero.");
@@ -342,11 +358,13 @@ export async function crearFijo(d: DatosGastoFijo): Promise<string> {
 }
 
 export async function eliminarFijo(id: string): Promise<void> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   await db.runAsync("UPDATE gastos_fijos SET eliminado = 1, actualizado_en = ? WHERE id = ?", [ahoraISO(), id]);
 }
 
 export async function listarFijos(ambito: Ambito, hoy: string): Promise<GastoFijo[]> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   const mes = hoy.slice(0, 7);
   const diaHoy = Number(hoy.slice(8, 10));
@@ -377,6 +395,7 @@ export async function guardarPresupuesto(
   categoria: string,
   montoCentavos: number
 ): Promise<void> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   const ts = ahoraISO();
   if (montoCentavos <= 0) {
@@ -398,6 +417,7 @@ export async function guardarPresupuesto(
 // ---------------------------------------------------------------------------
 
 export async function resumen(ambito: Ambito, hoy: string): Promise<ResumenFinanzas> {
+  await exigirPermiso("verFinanzas");
   const db = await bd();
   const esNegocio = ambito === "negocio";
   const mes = hoy.slice(0, 7);

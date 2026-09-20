@@ -16,8 +16,8 @@
 // 3. La lista de departamentos pasa a <Grupo>/<Fila>, igual que cualquier
 //    otra lista de la app — antes tenía su propio estilo de fila suelto.
 
-import { useState, useEffect, useCallback } from "react";
-import { View, TextInput, Pressable } from "react-native";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { View, TextInput, Pressable, ScrollView } from "react-native";
 import {
   Categoria,
   listarCategorias,
@@ -26,7 +26,7 @@ import {
   eliminarCategoria,
 } from "@/src/base/inventario";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { ICONOS, Icono } from "@/src/componentes/iconos";
+import { ICONOS, CATEGORIAS_ICONOS, Icono } from "@/src/componentes/iconos";
 import {
   Boton,
   Banner,
@@ -59,12 +59,31 @@ export default function ModalDepartamentos({
   const [nombre, setNombre] = useState("");
   const [color, setColor] = useState<string>(COLORES_DEPTO[0]);
   const [icono, setIcono] = useState<string>("caja");
+  // FILTRO QUE ORDENA, NO QUE LIMITA
+  // -------------------------------------------------------------------------
+  // Arranca SIEMPRE en null ("Todos") y nunca se preselecciona con el giro
+  // guardado del negocio. Una abarrotera que ademas hace comida tiene que
+  // poder elegir el icono de tacos sin sentir que la app le dice de que es su
+  // negocio. El filtro esta para que 49 iconos se puedan recorrer, no para
+  // decidir cuales le tocan a quien.
+  const [catIcono, setCatIcono] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
   // Confirmación de borrado en dos pasos, sin Alert nativo: null = nada que
   // confirmar; si trae un departamento, la hoja de confirmación está abierta.
   const [porBorrar, setPorBorrar] = useState<Categoria | null>(null);
   const [borrando, setBorrando] = useState(false);
+
+  const iconosVisibles = useMemo(() => {
+    if (!catIcono) return ICONOS;
+    const enCategoria = ICONOS.filter((i) => i.categoria === catIcono);
+    // El icono YA ELEGIDO se muestra aunque sea de otra categoria. Sin esto,
+    // al cambiar de filtro desaparecia de la cuadricula y no habia forma de
+    // ver cual estaba puesto — parecia que se habia perdido la seleccion.
+    if (enCategoria.some((i) => i.id === icono)) return enCategoria;
+    const elegido = ICONOS.find((i) => i.id === icono);
+    return elegido ? [elegido, ...enCategoria] : enCategoria;
+  }, [catIcono, icono]);
 
   const cargar = useCallback(async () => {
     setCats(await listarCategorias());
@@ -175,8 +194,40 @@ export default function ModalDepartamentos({
         <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
           Icono · lo heredan sus productos
         </Txt>
+        {/* Filtro por giro. Scroller horizontal: las categorias caben de
+            sobra en una tira y nunca se parten en dos filas desiguales.
+            "Todos" va primero y es el estado inicial. */}
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={{ gap: T.esps.sm, paddingBottom: T.esps.md }}
+          style={{ marginHorizontal: -T.esps.lg, paddingHorizontal: T.esps.lg }}
+        >
+          {[{ id: null as string | null, nombre: "Todos" }, ...CATEGORIAS_ICONOS].map((c) => {
+            const activo = catIcono === c.id;
+            return (
+              <Pressable
+                key={c.id ?? "todos"}
+                onPress={() => setCatIcono(c.id)}
+                style={{
+                  paddingHorizontal: T.esps.md,
+                  paddingVertical: T.esps.sm,
+                  borderRadius: 999,
+                  backgroundColor: activo ? color + "26" : T.superficie2,
+                  borderWidth: 1,
+                  borderColor: activo ? color : T.borde,
+                }}
+              >
+                <Txt escala="micro" fuerte tono={activo ? "principal" : "suave"}>
+                  {c.nombre}
+                </Txt>
+              </Pressable>
+            );
+          })}
+        </ScrollView>
+
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.sm, marginBottom: T.esps.lg }}>
-          {ICONOS.map((ic) => {
+          {iconosVisibles.map((ic) => {
             const activo = icono === ic.id;
             return (
               <Pressable

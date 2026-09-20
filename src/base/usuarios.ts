@@ -14,6 +14,7 @@
 import { bd, uuid, ahoraISO } from "./db";
 import { leerConfig, guardarConfig } from "./config";
 import { encolar } from "./sync";
+import { exigirPermiso } from "./permisos";
 
 export type Rol = "dueno" | "gerente" | "cajero";
 
@@ -82,11 +83,28 @@ export async function crearUsuario(
   pin: string,
   rol: Rol
 ): Promise<string> {
+  // La puerta más importante de la app... salvo en el arranque. Si todavía
+  // no existe NINGÚN usuario, esta llamada es el propio onboarding
+  // creándose a sí mismo como el primer dueño — exigir "gestionarUsuarios"
+  // aquí era un candado sin llave: hacía falta ser dueño para crear al
+  // primer dueño, y por eso NADIE podía terminar el onboarding ni por el
+  // botón normal ni vinculando cuenta (los dos caminos llaman aquí).
+  // Con usuarios ya existentes, la protección normal sigue exactamente
+  // igual: solo dueño/gerente pueden dar de alta a alguien más.
+  const yaHayUsuarios = (await listarUsuarios()).length > 0;
+  if (yaHayUsuarios) {
+    await exigirPermiso("gestionarUsuarios");
+  }
   if (!nombre.trim()) throw new Error("El nombre no puede estar vacío.");
   validarPin(pin);
   const db = await bd();
   const id = uuid();
   const ahora = ahoraISO();
+  // Alta y encolado en la MISMA transacción: o quedan los dos, o ninguno.
+  // Suelto, un fallo entre ambos dejaba un cajero que existe en el teléfono
+  // pero que las otras cajas nunca ven, así que sus ventas llegan atribuidas
+  // a un usuario inexistente.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `INSERT INTO usuarios_pos (id, nombre, pin_hash, rol, activo, eliminado, creado_en, actualizado_en)
      VALUES (?,?,?,?,1,0,?,?)`,
@@ -99,6 +117,7 @@ export async function crearUsuario(
     id, nombre: nombre.trim(), rol, activo: 1, eliminado: 0,
     creado_en: ahora, actualizado_en: ahora,
   });
+  });
   return id;
 }
 
@@ -108,9 +127,11 @@ export async function editarUsuario(
   rol: Rol,
   pinNuevo?: string
 ): Promise<void> {
+  await exigirPermiso("gestionarUsuarios");
   if (!nombre.trim()) throw new Error("El nombre no puede estar vacío.");
   const db = await bd();
   const ahoraEd = ahoraISO();
+  await db.withTransactionAsync(async () => {
   if (pinNuevo) {
     validarPin(pinNuevo);
     await db.runAsync(
@@ -127,13 +148,20 @@ export async function editarUsuario(
   await encolar("usuarios_pos", id, {
     id, nombre: nombre.trim(), rol, actualizado_en: ahoraEd,
   }, "update");
+  });
 }
 
 export async function eliminarUsuario(id: string): Promise<void> {
+  await exigirPermiso("gestionarUsuarios");
   const db = await bd();
   // No dejar el negocio sin dueño.
+  // `activo = 1` es imprescindible: sin él, un dueño DESACTIVADO contaba
+  // como "otro dueño" y dejaba borrar al último dueño activo. Resultado:
+  // nadie con rol de dueño puede entrar y no hay forma de arreglarlo desde
+  // la app. (El PC tenía exactamente el mismo fallo.)
   const duenos = await db.getFirstAsync<{ n: number }>(
-    "SELECT COUNT(*) AS n FROM usuarios_pos WHERE rol = 'dueno' AND eliminado = 0 AND id <> ?",
+    `SELECT COUNT(*) AS n FROM usuarios_pos
+      WHERE rol = 'dueno' AND eliminado = 0 AND activo = 1 AND id <> ?`,
     [id]
   );
   const esDueno = await db.getFirstAsync<{ rol: string }>(
@@ -144,13 +172,18 @@ export async function eliminarUsuario(id: string): Promise<void> {
     throw new Error("Debe quedar al menos un usuario con rol de Dueño.");
 
   const ahoraEl = ahoraISO();
-  await db.runAsync(
-    "UPDATE usuarios_pos SET eliminado = 1, actualizado_en = ? WHERE id = ?",
-    [ahoraEl, id]
-  );
-  await encolar("usuarios_pos", id, {
-    id, eliminado: 1, activo: 0, actualizado_en: ahoraEl,
-  }, "update");
+  await db.withTransactionAsync(async () => {
+    // `activo = 0` también en LOCAL. El payload ya lo mandaba, pero el UPDATE
+    // local no lo ponía: la nube veía el usuario inactivo y el teléfono lo
+    // seguía viendo activo. Dos verdades para el mismo hecho.
+    await db.runAsync(
+      "UPDATE usuarios_pos SET eliminado = 1, activo = 0, actualizado_en = ? WHERE id = ?",
+      [ahoraEl, id]
+    );
+    await encolar("usuarios_pos", id, {
+      id, eliminado: 1, activo: 0, actualizado_en: ahoraEl,
+    }, "update");
+  });
   // Si era el activo, se deselecciona.
   if ((await usuarioActivoId()) === id) await guardarConfig("usuario_activo", "");
 }

@@ -33,7 +33,7 @@
 //              gestos que aprender. A cambio se va con el scroll: si el
 //              usuario bajó, tiene que subir para alcanzarlo.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import {
   View,
   Pressable,
@@ -47,7 +47,9 @@ import Animated, {
   withTiming,
   withSpring,
   interpolate,
+  runOnJS,
 } from "react-native-reanimated";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, router } from "expo-router";
 import {
@@ -66,6 +68,7 @@ import {
 import { pesos, fmtFecha, aCentavos } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { useReduceMotion } from "@/src/componentes/useReduceMotion";
+import BotonYaxo from "@/src/componentes/BotonYaxo";
 import {
   Pantalla,
   Encabezado,
@@ -97,6 +100,7 @@ import ModalLealtad from "@/src/componentes/ModalLealtad";
 import ModalTienda from "@/src/componentes/ModalTienda";
 import ModalPedidosWeb from "@/src/componentes/ModalPedidosWeb";
 import ModalCotizaciones from "@/src/componentes/ModalCotizaciones";
+import ModalDevoluciones from "@/src/componentes/ModalDevoluciones";
 import { estadoTienda } from "@/src/base/tienda";
 import { leerReglas } from "@/src/base/lealtad";
 import ModalDinero from "@/src/componentes/ModalDinero";
@@ -106,6 +110,7 @@ import ModalCredito from "@/src/componentes/ModalCredito";
 import ModalMovimientoCaja from "@/src/componentes/ModalMovimientoCaja";
 import {
   PanelHerramientas,
+  useCajonAnim,
   TiradorHerramientas,
   CajonHerramientas,
 } from "@/src/componentes/PanelHerramientas";
@@ -114,9 +119,11 @@ import {
   TODAS_HERRAMIENTAS,
   herramientaPorId,
   leerAncladas,
+  MAX_ANCLADAS,
   leerAccesosOcultos,
   guardarAccesosOcultos,
 } from "@/src/base/herramientas";
+import { permisosActuales, type MapaPermisos } from "@/src/base/permisos";
 import {
   Mision,
   obtenerMisiones,
@@ -130,6 +137,87 @@ type Corte = Awaited<ReturnType<typeof corteTurno>>;
 
 // La bandera que decide la puerta de entrada al panel. Cambia esto y prueba.
 const VARIANTE_PANEL: "tirador" | "cajon" = "tirador";
+
+
+// ---------------------------------------------------------------------------
+// Aviso descartable
+// ---------------------------------------------------------------------------
+// Un aviso es un HECHO que acaba de pasar y que se puede atender: llegó un
+// pedido, hoy visita un proveedor, un producto se quedó en negativo. NO es un
+// estado permanente: "3 productos sin sellos NOM" en un abarrotes que nunca
+// usará esa herramienta sería ruido eterno, y un aviso que no se puede quitar
+// deja de leerse a los dos días.
+//
+// Por eso se descartan deslizando a un lado, como las notificaciones del
+// teléfono: el gesto ya lo conoce todo el mundo y no hay que enseñarlo. El
+// descarte es de esta sesión — si el hecho sigue vigente mañana, el aviso
+// vuelve. Es deliberado: descartar significa "ya lo vi", no "no me lo
+// vuelvas a decir nunca".
+// REGLA GENERAL PARA CUALQUIER AVISO NUEVO QUE SE AÑADA AQUÍ
+// ---------------------------------------------------------------------------
+// Descartar un aviso NUNCA silencia a la herramienta que lo emitió. Se
+// comporta como una notificación del teléfono: si vuelve a pasar algo, vuelve
+// a avisar.
+//
+// Para conseguirlo, la clave de descarte tiene que ser la IDENTIDAD DEL
+// HECHO, no el nombre de la herramienta:
+//
+//   MAL   "proveedores"            -> lo descartas una vez y no vuelve nunca
+//   MAL   "proveedores:1"          -> otro proveedor distinto sigue siendo 1
+//   BIEN  "proveedores:<día>:<quién>~<cuándo>"
+//
+// La regla práctica: si el usuario consideraría que "ha pasado algo nuevo",
+// la clave DEBE cambiar. Ante la duda, mete más cosas en la clave: un aviso
+// repetido molesta un segundo; uno que no llega puede costar una venta.
+//
+// Lo que NO resuelve esto y necesita su propio diseño: la frecuencia. Un
+// aviso de crédito ("$310 por cobrar") es un estado que sigue siendo verdad
+// mañana, así que no debe salir cada día — necesita una cadencia propia
+// (cada 2 o 3 días, configurable). Eso va en la herramienta que lo emite, no
+// aquí.
+function AvisoDescartable({
+  children,
+  onDescartar,
+}: {
+  children: ReactNode;
+  onDescartar: () => void;
+}) {
+  const x = useSharedValue(0);
+
+  const gesto = Gesture.Pan()
+    .activeOffsetX([-14, 14]) // no robar el scroll vertical de la pantalla
+    .onUpdate((e) => {
+      x.value = e.translationX;
+    })
+    .onEnd((e) => {
+      const fuera = Math.abs(e.translationX) > 110 || Math.abs(e.velocityX) > 780;
+      if (fuera) {
+        // La llamada va enganchada a ESTA animación, no a una segunda en
+        // paralelo: cuando la tarjeta termina de salir, se descarta.
+        x.value = withTiming(
+          e.translationX > 0 ? 500 : -500,
+          { duration: 160 },
+          (fin) => {
+            "worklet";
+            if (fin) runOnJS(onDescartar)();
+          }
+        );
+      } else {
+        x.value = withSpring(0, { damping: 18, stiffness: 220 });
+      }
+    });
+
+  const estilo = useAnimatedStyle(() => ({
+    transform: [{ translateX: x.value }],
+    opacity: interpolate(Math.abs(x.value), [0, 140], [1, 0.35]),
+  }));
+
+  return (
+    <GestureDetector gesture={gesto}>
+      <Animated.View style={estilo}>{children}</Animated.View>
+    </GestureDetector>
+  );
+}
 
 // ===========================================================================
 // Celebración de misiones completas (una sola vez en la vida de la app)
@@ -489,6 +577,12 @@ function HojaCorte({
             </Txt>
             {linea("Efectivo", pesos(corte.efectivo_centavos))}
             {linea("Tarjeta", pesos(corte.tarjeta_centavos))}
+            {corte.transferencia_centavos > 0
+              ? linea("Transferencia", pesos(corte.transferencia_centavos))
+              : null}
+            {corte.credito_centavos > 0
+              ? linea("Crédito (fiado)", pesos(corte.credito_centavos))
+              : null}
 
             <View
               style={{
@@ -507,6 +601,9 @@ function HojaCorte({
               : null}
             {corte.salidas_centavos > 0
               ? linea("Salidas de efectivo", `−${pesos(corte.salidas_centavos)}`, "peligro")
+              : null}
+            {corte.devoluciones_efectivo_centavos > 0
+              ? linea("Devoluciones en efectivo", `−${pesos(corte.devoluciones_efectivo_centavos)}`, "peligro")
               : null}
           </View>
 
@@ -625,14 +722,83 @@ export default function InicioScreen() {
   // Badge de pedidos web nuevos (viene de /api/tienda/estado, tolerante a
   // offline: null → 0 y la fila se muestra igual).
   const [pedidosNuevos, setPedidosNuevos] = useState(0);
+  // Avisos descartados. Se comportan como las notificaciones del teléfono:
+  // descartar una NO silencia las siguientes.
+  //
+  // La clave identifica el HECHO concreto, no el tipo de aviso:
+  //   pedidos      -> cuántos hay pendientes
+  //   proveedores  -> QUIÉNES vienen y QUÉ DÍA
+  //
+  // Por qué la identidad y no la cantidad: si el miércoles visita un
+  // proveedor y descartas el aviso, y el viernes visita OTRO, la cantidad
+  // sigue siendo 1 — con una clave por cantidad el segundo aviso nunca
+  // aparecería. Con la identidad, la clave cambia y vuelve a avisar, que es
+  // lo que hace WhatsApp cuando borras una notificación y llega otro
+  // mensaje.
+  //
+  // Vive en memoria, no en la base: descartar significa "ya lo vi", no
+  // "silencia esta herramienta". Para eso, más adelante, un ajuste de qué
+  // herramientas pueden avisar.
+  const [descartados, setDescartados] = useState<Set<string>>(new Set());
+  const descartar = useCallback((id: string) => {
+    setDescartados((s) => new Set(s).add(id));
+  }, []);
+
+  // Identidad del aviso de proveedores: QUIÉN visita, CUÁNDO ("hoy",
+  // "mañana"…) y en qué día se está avisando.
+  //
+  // La etiqueta forma parte de la identidad a propósito: "mañana llega
+  // Coca" y "hoy llega Coca" son hechos DISTINTOS aunque sea el mismo
+  // proveedor. Sin ella, descartar el domingo el aviso de "mañana llega"
+  // enterraba también el del lunes "hoy llega" — que es justo el que
+  // importa. Y la semana siguiente los dos vuelven a salir, porque cambia
+  // la fecha.
+  const firmaProv = useMemo(
+    () =>
+      `proveedores:${new Date().toDateString()}:${avisosProv
+        .map((a) => `${a.etiqueta}~${a.proveedor.nombre}`)
+        .sort()
+        .join("|")}`,
+    [avisosProv]
+  );
 
   // Un solo estado para saber qué herramienta está abierta, en vez de nueve
   // banderas booleanas independientes que podían quedar en estados imposibles
   // (dos modales "abiertos" a la vez).
   const [abierta, setAbierta] = useState<IdHerramienta | null>(null);
+  const [permisos, setPermisos] = useState<MapaPermisos | null>(null);
   const [panelAbierto, setPanelAbierto] = useState(false);
-  const [ancladas, setAncladas] = useState<IdHerramienta[]>([]);
+  // Valores compartidos entre el tirador y la hoja: son los que permiten que
+  // arrastrar el primero mueva la segunda fotograma a fotograma. Se crean
+  // aquí porque es el único sitio que ve a las dos piezas.
+  const cajon = useCajonAnim();
+  // Estables a propósito: TiradorHerramientas memoiza el gesto con estas dos
+  // funciones entre sus dependencias. Con flechas creadas en cada render, el
+  // gesto se reconstruiría mientras el dedo está encima y el arrastre se
+  // cortaría a media apertura.
+  const abrirPanel = useCallback(() => setPanelAbierto(true), []);
+  const cerrarPanel = useCallback(() => setPanelAbierto(false), []);
   const [accesosOcultos, setAccesosOcultos] = useState(false);
+
+  // Estados que el panel NO puede calcular en local porque dependen del
+  // servidor. Solo se inyecta lo que este archivo ya consultó de verdad
+  // (num_pedidos_nuevos): el resto de herramientas resuelve su estado por SQL
+  // en src/base/estadoHerramientas.ts.
+  const estadosRemotos = useMemo(
+    () =>
+      pedidosNuevos > 0
+        ? {
+            pedidos: {
+              texto: `${pedidosNuevos} ${
+                pedidosNuevos === 1 ? "pedido nuevo" : "pedidos nuevos"
+              } sin atender`,
+              atencion: true,
+            },
+          }
+        : {},
+    [pedidosNuevos]
+  );
+  const [ancladas, setAncladas] = useState<IdHerramienta[]>([]);
   const [usuariosAbierto, setUsuariosAbierto] = useState(false);
   const [syncAbierto, setSyncAbierto] = useState(false);
   const [movimientoAbierto, setMovimientoAbierto] = useState(false);
@@ -647,16 +813,18 @@ export default function InicioScreen() {
       router.replace("/onboarding");
       return;
     }
-    const [t, r, v, u] = await Promise.all([
+    const [t, r, v, u, perm] = await Promise.all([
       turnoActivo(),
       resumenHoy(),
       ventasRecientes(6),
       usuarioActivo(),
+      permisosActuales(),
     ]);
     setTurno(t);
     setResumen(r);
     setRecientes(v);
     setUsuario(u);
+    setPermisos(perm);
     setSync(await estadoSync());
     setSyncAuto(await leerSyncAuto());
     setNegocio(await leerNombreNegocio());
@@ -743,10 +911,31 @@ export default function InicioScreen() {
     return "Buenas noches";
   })();
 
-  // Visibilidad de cada herramienta según el estado del negocio.
+  // Visibilidad de cada herramienta: estado del negocio Y PERMISOS del
+  // usuario activo.
+  //
+  // Ocultar es CORTESÍA, no seguridad: quien protege de verdad es
+  // `exigirPermiso()` dentro de cada función de datos (ver permisos.ts). Pero
+  // un cajero no debería ver la puerta de "Dinero" —que son las finanzas
+  // PERSONALES del dueño, la renta de su casa— aunque al abrirla no pudiera
+  // hacer nada.
+  //
+  // Mientras los permisos cargan, `permisos` es null y solo se muestra lo que
+  // cualquier rol puede usar. Es preferible que una herramienta aparezca un
+  // instante después a que se vea y desaparezca.
   function visible(id: IdHerramienta): boolean {
-    if (id === "lealtad") return lealtadActiva;
-    if (id === "tienda" || id === "pedidos") return modoUso !== "monitor";
+    if (id === "lealtad" && !lealtadActiva) return false;
+    if ((id === "tienda" || id === "pedidos") && modoUso === "monitor") return false;
+    if (!permisos) {
+      // Sin permisos resueltos todavía: solo lo que no exige rol.
+      return !["dinero", "proveedores", "recetas", "despensa", "etiquetas",
+               "cotizaciones", "compras"].includes(id);
+    }
+    if (id === "dinero") return permisos.verFinanzas;
+    if (id === "proveedores" || id === "compras") return permisos.gestionarProveedores;
+    if (id === "recetas" || id === "despensa") return permisos.editarRecetas;
+    if (id === "etiquetas") return permisos.editarCatalogo;
+    if (id === "cotizaciones") return permisos.editarCatalogo;
     return true;
   }
 
@@ -776,97 +965,124 @@ export default function InicioScreen() {
             retiró: se repetía en las cinco pestañas robando altura vertical,
             que en un punto de venta es lo más caro que hay. La marca vive en
             el ícono de la app y en el arranque. */}
+        {/* Yaxo vive en `acciones`, que es donde el Encabezado ya pone lo
+            pulsable de cada pantalla. Va AQUÍ y no en una tarjeta aparte por
+            dos motivos:
+
+            1. La misma posición en todas las pantallas. Si el acceso salta de
+               sitio deja de ser un gesto y pasa a ser algo que hay que buscar.
+            2. No roba altura. Inicio existe para responder "cuánto llevo hoy";
+               una tarjeta del asistente empujaría esa cifra hacia abajo, y es
+               lo único por lo que alguien abre esta pantalla.
+
+            `desde="inicio"` hace que abra con todas las preguntas. Desde
+            Inventario o Reportes se pasa el origen de esa pantalla y Yaxo
+            ordena las suyas primero. */}
         <Encabezado
           titulo={saludo}
           meta={negocio && negocio !== "Mi negocio" ? negocio : undefined}
+          acciones={<BotonYaxo desde="inicio" />}
         />
 
-        {/* Quién vende y cómo va la nube: contexto, no protagonismo. */}
+        {/* Quién vende y cómo va la nube: UNA línea, no una tarjeta.
+            Antes era un Grupo con dos filas completas justo bajo el saludo,
+            y competía con "Vendido hoy" — que es la única cifra por la que
+            alguien abre esta pantalla. Ninguno de esos dos datos es algo que
+            se consulte: son contexto de fondo ("¿con qué cuenta estoy?",
+            "¿subió todo?"). Como línea tenue siguen ahí y siguen siendo
+            tocables, pero dejan de pelear por la atención.
+            Se conservan los dos destinos de siempre: el nombre abre el
+            cambio de usuario, el estado de nube abre Sincronización. */}
         {(usuario || sync?.vinculado) && (
-          <View style={{ marginBottom: T.esps.xl }}>
-            <Grupo>
-              {usuario ? (
-                <Fila
-                  titulo={usuario.nombre}
-                  meta="Vendiendo con esta cuenta"
-                  onPress={() => setUsuariosAbierto(true)}
-                  icono={
-                    <View
-                      style={{
-                        width: 26,
-                        height: 26,
-                        borderRadius: T.radioChico,
-                        backgroundColor: T.acentoSuave,
-                        alignItems: "center",
-                        justifyContent: "center",
-                      }}
-                    >
-                      <Txt escala="pie" tono="acento" fuerte>
-                        {usuario.nombre.trim()[0]?.toUpperCase() ?? "?"}
-                      </Txt>
-                    </View>
-                  }
-                  valor={
-                    <Txt escala="pie" tono="acento" fuerte>
-                      Cambiar
-                    </Txt>
-                  }
-                  flecha={false}
-                />
-              ) : null}
-              {sync?.vinculado ? (
-                <Fila
-                  titulo={
-                    sync.pendientes > 0
-                      ? `${sync.pendientes} por subir a la nube`
+          <View
+            style={{
+              flexDirection: "row",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: T.esps.sm,
+              marginTop: -T.esps.sm,
+              marginBottom: T.esps.lg,
+            }}
+          >
+            {usuario ? (
+              <Pressable onPress={() => setUsuariosAbierto(true)} hitSlop={8}>
+                <Txt escala="micro" tono="tenue">
+                  {usuario.nombre}
+                </Txt>
+              </Pressable>
+            ) : null}
+
+            {usuario && sync?.vinculado ? (
+              <Txt escala="micro" tono="tenue">
+                ·
+              </Txt>
+            ) : null}
+
+            {sync?.vinculado ? (
+              <Pressable onPress={() => setSyncAbierto(true)} hitSlop={8}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+                  {/* El punto de color es lo único que puede necesitar una
+                      mirada rápida: rojo = hay algo sin subir. */}
+                  <View
+                    style={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: 3,
+                      backgroundColor: sync.pendientes > 0 ? T.alerta : T.exito,
+                    }}
+                  />
+                  <Txt escala="micro" tono="tenue">
+                    {sync.pendientes > 0
+                      ? `${sync.pendientes} por subir`
                       : syncAuto
-                        ? "Todo sincronizado"
-                        : "Respaldo manual"
-                  }
-                  meta={
-                    sync.pendientes > 0
-                      ? "Se subirán solas cuando haya internet"
-                      : syncAuto
-                        ? undefined
-                        : "Tú decides cuándo subir"
-                  }
-                  onPress={() => setSyncAbierto(true)}
-                  icono={
-                    <View
-                      style={{
-                        width: 9,
-                        height: 9,
-                        borderRadius: 5,
-                        backgroundColor: sync.pendientes > 0 ? T.alerta : T.exito,
-                      }}
-                    />
-                  }
-                />
-              ) : null}
-            </Grupo>
+                        ? "Sincronizado"
+                        : "Respaldo manual"}
+                  </Txt>
+                </View>
+              </Pressable>
+            ) : null}
           </View>
         )}
 
-        {/* Pedido web nuevo: el mismo lenguaje visual que el aviso de
-            proveedor de abajo (Fila destacada), pero ANTES de la lámina de
-            "Vendido hoy" — un cliente esperando su pedido es más urgente
-            que la cifra de cuánto se lleva vendido, así que se gana el
-            primer lugar sin robarle el protagonismo a la lámina (sigue
-            siendo la única <Lamina> de la pantalla). Antes esto solo vivía
-            como un número dentro del panel de Herramientas: había que
-            entrar a buscarlo para enterarte. */}
-        {pedidosNuevos > 0 && (
+        {modoUso !== "monitor" && avisosProv.length > 0 && !descartados.has(firmaProv) && (
+          <AvisoDescartable onDescartar={() => descartar(firmaProv)}>
           <View style={{ marginBottom: T.esps.xl }}>
             <Grupo>
               <Fila
                 destacado
-                titulo={`${pedidosNuevos} ${pedidosNuevos === 1 ? "pedido nuevo" : "pedidos nuevos"} de tu tienda en línea`}
-                meta="Tocar para revisarlos"
-                icono={<IconoUI id="pedido" size={20} color={T.acento} />}
-                onPress={() => abrir("pedidos")}
+                titulo={`${avisosProv[0].etiqueta} llega ${avisosProv[0].proveedor.nombre}${
+                  avisosProv.length > 1 ? ` y ${avisosProv.length - 1} más` : ""
+                }`}
+                meta={
+                  avisosProv[0].ultimoTicketCentavos != null
+                    ? `Último ticket ${pesos(avisosProv[0].ultimoTicketCentavos)}${
+                        avisosProv[0].ticketPromedioCentavos != null
+                          ? ` · promedio ${pesos(avisosProv[0].ticketPromedioCentavos)}`
+                          : ""
+                      }`
+                    : undefined
+                }
+                icono={<IconoUI id="camion" size={20} color={T.acento} />}
+                onPress={() => setAbierta("proveedores")}
               />
             </Grupo>
           </View>
+          </AvisoDescartable>
+        )}
+        {pedidosNuevos > 0 && !descartados.has(`pedidos:${pedidosNuevos}`) && (
+          <AvisoDescartable onDescartar={() => descartar(`pedidos:${pedidosNuevos}`)}>
+            <View style={{ marginBottom: T.esps.md }}>
+              <Grupo>
+                <Fila
+                  destacado
+                  titulo={`${pedidosNuevos} ${pedidosNuevos === 1 ? "pedido nuevo" : "pedidos nuevos"} de tu tienda en línea`}
+                  meta="Tocar para revisarlos · desliza para descartar"
+                  icono={<IconoUI id="pedido" size={20} color={T.acento} />}
+                  onPress={() => abrir("pedidos")}
+                />
+              </Grupo>
+            </View>
+          </AvisoDescartable>
         )}
 
         {/* Vendido hoy — la ÚNICA protagonista de la pantalla. */}
@@ -989,29 +1205,6 @@ export default function InicioScreen() {
         </View>
 
         {/* Aviso de visita de proveedores. Solo si este dispositivo vende. */}
-        {modoUso !== "monitor" && avisosProv.length > 0 && (
-          <View style={{ marginBottom: T.esps.xl }}>
-            <Grupo>
-              <Fila
-                destacado
-                titulo={`${avisosProv[0].etiqueta} llega ${avisosProv[0].proveedor.nombre}${
-                  avisosProv.length > 1 ? ` y ${avisosProv.length - 1} más` : ""
-                }`}
-                meta={
-                  avisosProv[0].ultimoTicketCentavos != null
-                    ? `Último ticket ${pesos(avisosProv[0].ultimoTicketCentavos)}${
-                        avisosProv[0].ticketPromedioCentavos != null
-                          ? ` · promedio ${pesos(avisosProv[0].ticketPromedioCentavos)}`
-                          : ""
-                      }`
-                    : undefined
-                }
-                icono={<IconoUI id="camion" size={20} color={T.acento} />}
-                onPress={() => setAbierta("proveedores")}
-              />
-            </Grupo>
-          </View>
-        )}
 
         {/* Tu arranque — misiones para dejar el negocio listo */}
         {misiones && misiones.length > 0 && (
@@ -1071,6 +1264,26 @@ export default function InicioScreen() {
             sitio y en el mismo orden. Nunca una lista automática por
             frecuencia: si el orden cambia solo, se pierde la memoria muscular
             y el usuario pasa de mirar a leer. */}
+        {/* Accesos anclados: los que el usuario eligió, SIEMPRE en el mismo
+            sitio y en el mismo orden. Nunca una lista automática por
+            frecuencia: si el orden cambia solo, se pierde la memoria muscular
+            y el usuario pasa de mirar a leer.
+
+            REHECHO. Antes era una fila de cuatro columnas con `flex: 1` por
+            acceso, y eso tenía dos fallos que solo se ven con datos reales:
+
+              · Con UN solo acceso anclado, ese `flex: 1` lo estiraba a todo
+                el ancho de la pantalla: una tarjeta enorme con un icono de
+                19px perdido en el centro.
+              · El nombre iba a cuatro columnas, así que "Departamentos" se
+                partía en "Departament / os" y "Devolver o cancelar" ocupaba
+                dos renglones.
+
+            Ahora es una rejilla de DOS columnas con el icono a la izquierda y
+            el nombre corto a su lado, en una sola línea. Un acceso ocupa media
+            fila, que se lee como una decisión y no como un hueco. Y se añade
+            una ranura "+" mientras quede sitio, que enseña que esto se puede
+            llenar sin necesidad de un texto de ayuda. */}
         {!accesosOcultos && ancladas.length > 0 && (
           <View style={{ marginBottom: T.esps.xl }}>
             <View
@@ -1084,13 +1297,16 @@ export default function InicioScreen() {
               <Txt escala="micro" tono="suave" fuerte mayus>
                 Tus accesos
               </Txt>
+              {/* Ocultar SÍ existe, pero ya no es un callejón sin salida: la
+                  vuelta está en el panel de Herramientas, sección "Tus
+                  accesos", a un toque del tirador que se ve siempre. */}
               <Pressable
                 onPress={async () => {
                   setAccesosOcultos(true);
                   await guardarAccesosOcultos(true);
                 }}
                 hitSlop={10}
-                accessibilityLabel="Ocultar accesos"
+                accessibilityLabel="Ocultar accesos de Inicio"
                 style={{ minHeight: 32, justifyContent: "center" }}
               >
                 <Txt escala="pie" tono="tenue">
@@ -1098,74 +1314,114 @@ export default function InicioScreen() {
                 </Txt>
               </Pressable>
             </View>
-            <View style={{ flexDirection: "row", gap: T.esps.sm }}>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", marginHorizontal: -4 }}>
               {ancladas.map((id) => {
                 const h = herramientaPorId(id);
                 if (!h || !visible(id)) return null;
                 const badge = id === "pedidos" ? pedidosNuevos : 0;
                 return (
+                  <View key={id} style={{ width: "50%", padding: 4 }}>
+                    <Pressable
+                      onPress={() => abrir(id)}
+                      accessibilityRole="button"
+                      accessibilityLabel={
+                        badge > 0 ? `${h.titulo}, ${badge} pendientes` : h.titulo
+                      }
+                      android_ripple={{ color: T.acentoBorde }}
+                      style={({ pressed }) => ({
+                        flexDirection: "row",
+                        alignItems: "center",
+                        gap: T.esps.md,
+                        paddingVertical: T.esps.md,
+                        paddingHorizontal: T.esps.md,
+                        borderRadius: T.radio,
+                        backgroundColor: T.superficie,
+                        opacity: pressed ? 0.85 : 1,
+                        minHeight: 60,
+                      })}
+                    >
+                      <View
+                        style={{
+                          width: 36,
+                          height: 36,
+                          borderRadius: T.radioChico,
+                          backgroundColor: T.acentoSuave,
+                          alignItems: "center",
+                          justifyContent: "center",
+                        }}
+                      >
+                        <IconoUI id={h.icono} size={19} color={T.acento} />
+                        {badge > 0 ? (
+                          <View
+                            style={{
+                              position: "absolute",
+                              top: -4,
+                              right: -4,
+                              backgroundColor: T.peligro,
+                              borderRadius: T.radioPildora,
+                              minWidth: 17,
+                              height: 17,
+                              alignItems: "center",
+                              justifyContent: "center",
+                              paddingHorizontal: 4,
+                            }}
+                          >
+                            <Txt escala="micro" fuerte estilo={{ color: T.peligroTextoFuerte, fontSize: 9 }}>
+                              {badge > 9 ? "9+" : String(badge)}
+                            </Txt>
+                          </View>
+                        ) : null}
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Txt escala="pie" fuerte lineas={1}>
+                          {h.corto ?? h.titulo}
+                        </Txt>
+                      </View>
+                    </Pressable>
+                  </View>
+                );
+              })}
+
+              {/* Ranura vacía: invita a llenar sin ocupar una fila de texto
+                  explicativo. Desaparece sola al llegar al tope. */}
+              {ancladas.length < MAX_ANCLADAS ? (
+                <View style={{ width: "50%", padding: 4 }}>
                   <Pressable
-                    key={id}
-                    onPress={() => abrir(id)}
+                    onPress={() => setPanelAbierto(true)}
                     accessibilityRole="button"
-                    accessibilityLabel={
-                      badge > 0 ? `${h.titulo}, ${badge} pendientes` : h.titulo
-                    }
+                    accessibilityLabel="Anclar otra herramienta"
                     style={({ pressed }) => ({
-                      flex: 1,
+                      flexDirection: "row",
                       alignItems: "center",
-                      gap: T.esps.sm,
+                      gap: T.esps.md,
                       paddingVertical: T.esps.md,
-                      paddingHorizontal: T.esps.xs,
+                      paddingHorizontal: T.esps.md,
                       borderRadius: T.radio,
-                      backgroundColor: T.superficie,
-                      opacity: pressed ? 0.85 : 1,
-                      minHeight: 84,
+                      borderWidth: 1,
+                      borderStyle: "dashed",
+                      borderColor: T.borde,
+                      opacity: pressed ? 0.7 : 1,
+                      minHeight: 60,
                     })}
                   >
                     <View
                       style={{
                         width: 36,
                         height: 36,
-                        borderRadius: T.radioChico,
-                        backgroundColor: T.acentoSuave,
                         alignItems: "center",
                         justifyContent: "center",
                       }}
                     >
-                      <IconoUI id={h.icono} size={19} color={T.acento} />
-                      {badge > 0 ? (
-                        <View
-                          style={{
-                            position: "absolute",
-                            top: -4,
-                            right: -4,
-                            backgroundColor: T.peligro,
-                            borderRadius: T.radioPildora,
-                            minWidth: 17,
-                            height: 17,
-                            alignItems: "center",
-                            justifyContent: "center",
-                            paddingHorizontal: 4,
-                          }}
-                        >
-                          <Txt escala="micro" fuerte estilo={{ color: T.peligroTextoFuerte, fontSize: 9 }}>
-                            {badge > 9 ? "9+" : String(badge)}
-                          </Txt>
-                        </View>
-                      ) : null}
+                      <IconoUI id="mas" size={19} color={T.textoTenue} />
                     </View>
-                    <Txt
-                      escala="micro"
-                      tono="suave"
-                      lineas={2}
-                      estilo={{ textAlign: "center" }}
-                    >
-                      {h.titulo}
-                    </Txt>
+                    <View style={{ flex: 1 }}>
+                      <Txt escala="pie" tono="tenue" lineas={1}>
+                        Anclar otra
+                      </Txt>
+                    </View>
                   </Pressable>
-                );
-              })}
+                </View>
+              ) : null}
             </View>
           </View>
         )}
@@ -1220,15 +1476,26 @@ export default function InicioScreen() {
 
       {/* Variante A: tirador fijo. Siempre visible, siempre en el pulgar. */}
       {VARIANTE_PANEL === "tirador" && (
-        <TiradorHerramientas onAbrir={() => setPanelAbierto(true)} />
+        <TiradorHerramientas
+          cajon={cajon}
+          onAbrir={abrirPanel}
+          onCancelar={cerrarPanel}
+        />
       )}
 
       <PanelHerramientas
         visible={panelAbierto}
-        onCerrar={() => setPanelAbierto(false)}
+        onCerrar={cerrarPanel}
         visibleId={visible}
         onAncladasCambio={setAncladas}
+        // El panel es un Modal montado dentro de esta pantalla, así que al
+        // cerrarlo NO se dispara el useFocusEffect que releía la preferencia:
+        // había que salir a otra pestaña y volver para que los accesos
+        // reaparecieran. Con este aviso se actualiza en el acto.
+        onVisibilidadCambio={setAccesosOcultos}
         badges={pedidosNuevos > 0 ? { pedidos: pedidosNuevos } : undefined}
+        estadosExtra={estadosRemotos}
+        cajon={cajon}
         onAbrir={(id) => {
           setPanelAbierto(false);
           abrir(id);
@@ -1262,6 +1529,9 @@ export default function InicioScreen() {
         />
       )}
       {abierta === "dinero" && <ModalDinero onCerrar={cerrarYRecargar} />}
+      {abierta === "devoluciones" && (
+        <ModalDevoluciones onCerrar={cerrarHerramienta} onCambio={cargar} />
+      )}
       {/* Antes este modal se renderizaba POR ERROR en medio de la lista de
           accesos, entre dos filas. Su sitio es aquí, con los demás. */}
       {abierta === "etiquetas" && <ModalEtiquetas onCerrar={cerrarHerramienta} />}

@@ -32,26 +32,60 @@ import {
   Pressable,
   ScrollView,
   Share,
+  useWindowDimensions,
   StyleSheet,
   type TextStyle,
   type ViewStyle,
 } from "react-native";
 import Svg, { Polygon } from "react-native-svg";
 import { TicketVenta, textoRecibo } from "@/src/base/ticket";
+import { etiquetaFolio } from "@/src/base/venta";
+import type { MetodoPago } from "@/src/base/venta";
 import { pesos } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { IconoUI } from "@/src/componentes/iconos";
 
+const NOMBRE_METODO: Record<MetodoPago, string> = {
+  efectivo: "Efectivo",
+  tarjeta: "Tarjeta",
+  transferencia: "Transferencia",
+  credito: "Crédito",
+};
+
 type Tema = ReturnType<typeof useTema>["tema"];
 
-const DIENTE = 9; // ancho de cada triángulo del borde dentado
-const COLUMNAS = 40; // triángulos por fila (tapa el ancho de la tarjeta)
+/** 31/08/26 19:13 — con AÑO. Un recibo que solo dice "31 ago" no sirve para
+ *  buscar una venta meses después, que es justo cuando alguien saca un ticket
+ *  viejo del cajón. */
+function fechaConAnio(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${p(d.getFullYear() % 100)}  ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
 
-/** Fila de triángulos SVG que simula el corte dentado del recibo. */
-function BordeDentado({ color, arriba }: { color: string; arriba?: boolean }) {
+const DIENTE = 9; // ancho de cada triángulo del borde dentado
+
+/** Fila de triángulos SVG que simula el corte dentado del recibo.
+ *
+ *  El número de dientes se calcula del ancho REAL de la tarjeta, no de una
+ *  constante fija. Antes eran 40 dientes × 9px = 360px fijos dentro de una
+ *  tarjeta de 340: el SVG sobresalía por la derecha y, en pantallas
+ *  estrechas, arrastraba el recibo fuera del área visible — por eso los
+ *  importes de la derecha aparecían cortados en la previsualización. */
+function BordeDentado({
+  color,
+  arriba,
+  ancho,
+}: {
+  color: string;
+  arriba?: boolean;
+  ancho: number;
+}) {
+  const columnas = Math.max(1, Math.ceil(ancho / DIENTE));
   const puntas = useMemo(() => {
     const arr: string[] = [];
-    for (let i = 0; i < COLUMNAS; i++) {
+    for (let i = 0; i < columnas; i++) {
       const x = i * DIENTE;
       // Triángulo isósceles: arriba apunta hacia arriba, abajo hacia abajo.
       arr.push(
@@ -61,10 +95,10 @@ function BordeDentado({ color, arriba }: { color: string; arriba?: boolean }) {
       );
     }
     return arr;
-  }, [arriba]);
+  }, [arriba, columnas]);
   return (
-    <View style={{ overflow: "hidden" }}>
-      <Svg width={COLUMNAS * DIENTE} height={DIENTE}>
+    <View style={{ overflow: "hidden", width: ancho }}>
+      <Svg width={columnas * DIENTE} height={DIENTE}>
         {puntas.map((p, i) => (
           <Polygon key={i} points={p} fill={color} />
         ))}
@@ -83,6 +117,11 @@ export default function ModalTicket({
   const { tema: T } = useTema();
   const est = useMemo(() => crearEstilos(T), [T]);
   const papel = T.esClaro ? "#ffffff" : T.superficie2;
+  // Ancho REAL de la tarjeta: nunca más que la pantalla menos el margen
+  // del fondo (22 por lado). Con esto el recibo cabe siempre, y el borde
+  // dentado se dibuja exactamente de ese ancho.
+  const { width: anchoPantalla } = useWindowDimensions();
+  const anchoTicket = Math.min(340, Math.max(240, anchoPantalla - 44));
 
   async function compartir() {
     try {
@@ -95,7 +134,7 @@ export default function ModalTicket({
   return (
     <Modal visible transparent animationType="fade" onRequestClose={onCerrar}>
       <View style={est.fondo}>
-        <View style={est.zonaTicket}>
+        <View style={[est.zonaTicket, { maxWidth: anchoTicket }]}>
           {/* Palomita de confirmación */}
           <View style={est.ok}>
             <Text style={est.okTxt}>✓</Text>
@@ -108,12 +147,22 @@ export default function ModalTicket({
           >
             {/* El recibo */}
             <View style={est.recibo}>
-              <BordeDentado color={papel} arriba />
+              <BordeDentado color={papel} arriba ancho={anchoTicket} />
               <View style={[est.papel, { backgroundColor: papel }]}>
                 <Text style={est.negocio}>{ticket.nombre_negocio}</Text>
-                <Text style={est.meta}>
-                  Folio #{ticket.folio} · {ticket.fecha_legible}
-                </Text>
+
+                {/* Folio y fecha en extremos, como un recibo de verdad — antes
+                    iban centrados en una sola línea, que es lo que hacía que
+                    esto pareciera una nota y no un ticket. */}
+                <View style={est.cabFila}>
+                  <Text style={est.cabFolio}>
+                    Ticket {etiquetaFolio(ticket.folio, ticket.folio_prefijo, true)}
+                  </Text>
+                  <Text style={est.cabFecha}>{fechaConAnio(ticket.fecha_iso)}</Text>
+                </View>
+                {ticket.atendio ? (
+                  <Text style={est.cabAtendio}>Atendió: {ticket.atendio}</Text>
+                ) : null}
 
                 <View style={est.sep} />
 
@@ -133,26 +182,45 @@ export default function ModalTicket({
 
                 <View style={est.sep} />
 
-                <Totales etiqueta="Subtotal" valor={ticket.subtotal_centavos} est={est} />
+                {/* "Subtotal" solo cuando hay un descuento que explicar: sin
+                    él repetía el mismo número que Total y sobraba. */}
                 {ticket.descuento_centavos > 0 && (
-                  <Totales
-                    etiqueta="Descuento lealtad"
-                    valor={-ticket.descuento_centavos}
-                    est={est}
-                    bien
-                  />
+                  <>
+                    <Totales etiqueta="Subtotal" valor={ticket.subtotal_centavos} est={est} />
+                    <Totales
+                      etiqueta="Descuento lealtad"
+                      valor={-ticket.descuento_centavos}
+                      est={est}
+                      bien
+                    />
+                  </>
+                )}
+                {/* Base + impuesto ANTES del total, igual que el PC: se lee
+                    como una suma que termina en el total, y no como algo que
+                    pudiera sumarse encima. */}
+                {ticket.impuesto_centavos > 0 && (
+                  <>
+                    <Totales etiqueta="Base" valor={ticket.base_centavos} est={est} />
+                    <Totales
+                      etiqueta={`${ticket.impuesto_nombre} incl.`}
+                      valor={ticket.impuesto_centavos}
+                      est={est}
+                    />
+                  </>
                 )}
                 <Totales etiqueta="Total" valor={ticket.total_centavos} est={est} fuerte />
-                <Totales
-                  etiqueta={ticket.metodo === "efectivo" ? "Efectivo" : "Tarjeta"}
-                  valor={
-                    ticket.metodo === "efectivo"
-                      ? ticket.pagado_centavos
-                      : ticket.total_centavos
-                  }
-                  est={est}
-                />
-                {ticket.metodo === "efectivo" && (
+                {/* Un renglón por cada pago real aplicado — con un solo
+                    método (el caso de siempre) se ve exactamente igual que
+                    antes; con varios, cada uno se lee por su cuenta. */}
+                {ticket.pagos.map((p, i) => (
+                  <Totales
+                    key={i}
+                    etiqueta={NOMBRE_METODO[p.metodo]}
+                    valor={p.metodo === "efectivo" ? (p.recibido_centavos ?? p.monto_centavos) : p.monto_centavos}
+                    est={est}
+                  />
+                ))}
+                {ticket.cambio_centavos > 0 && (
                   <Totales etiqueta="Cambio" valor={ticket.cambio_centavos} est={est} bien />
                 )}
 
@@ -166,7 +234,7 @@ export default function ModalTicket({
                 )}
                 <Text style={est.despedida}>{ticket.despedida}</Text>
               </View>
-              <BordeDentado color={papel} />
+              <BordeDentado color={papel} ancho={anchoTicket} />
             </View>
           </ScrollView>
 
@@ -276,13 +344,30 @@ function crearEstilos(T: Tema) {
       textAlign: "center",
       letterSpacing: 0.4,
     },
-    meta: {
+    cabFila: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "baseline",
+      marginTop: 10,
+    },
+    cabFolio: {
+      color: T.texto,
+      fontSize: 12.5,
+      fontWeight: "800",
+      fontFamily: T.fuente.numFuerte,
+      letterSpacing: 0.3,
+    },
+    cabFecha: {
       color: T.textoTenue,
-      fontSize: T.tipo.pie,
-      textAlign: "center",
-      marginTop: 4,
-      fontWeight: "600",
+      fontSize: T.tipo.micro,
+      fontFamily: T.fuente.num,
+      fontVariant: ["tabular-nums"],
+    },
+    cabAtendio: {
+      color: T.textoTenue,
+      fontSize: T.tipo.micro,
       fontFamily: T.fuente.ui,
+      marginTop: 3,
     },
     sep: {
       borderTopWidth: 1,

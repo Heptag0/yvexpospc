@@ -5,26 +5,44 @@
 //   AJUSTAR:  "en realidad hay 18" -> fija el valor exacto.
 // Muestra vista previa del resultado antes de aplicar, y el historial de
 // movimientos recientes (rastro de ajustes_inventario).
+//
+// ---------------------------------------------------------------------------
+// MIGRADO AL SISTEMA DE DISEÑO
+// ---------------------------------------------------------------------------
+// Traía 90 líneas de StyleSheet propio con su Modal, su SafeAreaView y su
+// CabeceraModal montados a mano, más un segmentado con bordes de 1px que no
+// se parecía al de ninguna otra pantalla. Y pintaba la vista previa con
+// T.turquesa: el acento fantasma retirado en la Fase 1.
+//
+// Ahora es <Hoja tipo="completa"> con <Campo>, <Grupo>, <Fila>, <Txt> y
+// <Monto>. De paso hereda el KeyboardAvoidingView de <Hoja>, que es justo lo
+// que le faltaba: con `edgeToEdgeEnabled` el teclado tapaba el botón Aplicar
+// en cuanto se tocaba el campo (que además abre con autoFocus).
+//
+// El segmentado pasa al mismo patrón de Reportes y ModalMovimientoCaja:
+// pastilla rellena de acento sobre superficie2, sin bordes.
+//
+// La vista previa era una caja con filo izquierdo y el texto "18 → 42". Ahora
+// las cifras van en <Monto> (Plex Mono, igual que todo número de la app) y el
+// resultado se destaca con el tono, no con un borde de color.
 
-import { useEffect, useMemo, useState } from "react";
-import {
-  Modal,
-  View,
-  Text,
-  TextInput,
-  Pressable,
-  StyleSheet,
-  ScrollView,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import {
-  Producto,
-  ajustarStock,
-  historialAjustes,
-} from "@/src/base/inventario";
+import { useEffect, useState } from "react";
+import { View, TextInput, Pressable } from "react-native";
+import { Producto, ajustarStock, historialAjustes } from "@/src/base/inventario";
 import { aNumero, fmtStock, fmtFecha } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal, useEstiloInput } from "@/src/componentes/ui";
+import {
+  Boton,
+  Banner,
+  Campo,
+  Hoja,
+  Grupo,
+  Fila,
+  Lamina,
+  Txt,
+  Monto,
+  useEstiloInput,
+} from "@/src/componentes/ui";
 
 type Props = {
   producto: Producto;
@@ -45,11 +63,13 @@ const MOTIVOS: Record<string, string> = {
   conteo: "Conteo físico",
 };
 
-type Tema = ReturnType<typeof useTema>["tema"];
+const MODOS = [
+  { id: "resurtir" as const, label: "Resurtir (+)" },
+  { id: "ajustar" as const, label: "Fijar valor" },
+];
 
 export default function ModalAjusteStock({ producto, onCerrar, onAjustado }: Props) {
   const { tema: T } = useTema();
-  const est = useMemo(() => crearEstilos(T), [T]);
   const estiloInput = useEstiloInput();
   const [modo, setModo] = useState<"resurtir" | "ajustar">("resurtir");
   const [cantidad, setCantidad] = useState("");
@@ -86,169 +106,162 @@ export default function ModalAjusteStock({ producto, onCerrar, onAjustado }: Pro
   }
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={est.raiz}>
-        <CabeceraModal titulo="Ajustar stock" onIzquierda={onCerrar} izquierda="Cerrar" />
-        <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
-          {/* Producto y stock actual */}
-          <View style={est.prodCaja}>
-            <Text style={est.prodNombre}>{producto.nombre}</Text>
-            <Text style={est.prodStock}>
-              Stock actual:{" "}
-              <Text style={{ color: T.texto, fontWeight: "800" }}>
-                {fmtStock(producto.stock, producto.unidad)}
-              </Text>
-            </Text>
+    <Hoja
+      visible
+      onCerrar={guardando ? () => {} : onCerrar}
+      titulo="Ajustar stock"
+      tipo="completa"
+      pie={<Boton titulo="Aplicar" onPress={aplicar} cargando={guardando} />}
+    >
+      {/* El stock actual es la cifra protagonista: es contra lo que el
+          tendero compara mentalmente antes de escribir nada. */}
+      <View style={{ marginBottom: T.esps.xl }}>
+        <Lamina>
+          <Txt escala="micro" tono="suave" fuerte mayus>
+            Stock actual
+          </Txt>
+          <View style={{ marginTop: T.esps.xs }}>
+            <Monto
+              texto={fmtStock(producto.stock, producto.unidad)}
+              escala="protagonista"
+            />
           </View>
+          <Txt escala="pie" tono="suave" estilo={{ marginTop: T.esps.xs }} lineas={2}>
+            {producto.nombre}
+          </Txt>
+        </Lamina>
+      </View>
 
-          <Banner texto={error} tipo="error" />
+      <Banner texto={error} tipo="error" />
 
-          {/* Selector de modo */}
-          <View style={est.segmento}>
+      {/* Segmentado: mismo patrón que Reportes y ModalMovimientoCaja —
+          pastilla rellena sobre superficie2, sin bordes. */}
+      <View
+        style={{
+          flexDirection: "row",
+          backgroundColor: T.superficie2,
+          borderRadius: T.radio,
+          padding: 3,
+          marginBottom: T.esps.md,
+        }}
+      >
+        {MODOS.map((o) => {
+          const activo = modo === o.id;
+          return (
             <Pressable
-              onPress={() => setModo("resurtir")}
-              style={[est.segBtn, modo === "resurtir" && est.segActivo]}
+              key={o.id}
+              onPress={() => setModo(o.id)}
+              accessibilityRole="button"
+              accessibilityState={{ selected: activo }}
+              style={{
+                flex: 1,
+                minHeight: 44,
+                alignItems: "center",
+                justifyContent: "center",
+                borderRadius: T.radioChico,
+                backgroundColor: activo ? T.acentoRelleno : "transparent",
+              }}
             >
-              <Text style={[est.segTxt, modo === "resurtir" && est.segTxtActivo]}>
-                Resurtir (+)
-              </Text>
+              <Txt
+                escala="cuerpo"
+                fuerte={activo}
+                tono="suave"
+                estilo={activo ? { color: T.acentoTexto } : undefined}
+              >
+                {o.label}
+              </Txt>
             </Pressable>
-            <Pressable
-              onPress={() => setModo("ajustar")}
-              style={[est.segBtn, modo === "ajustar" && est.segActivo]}
-            >
-              <Text style={[est.segTxt, modo === "ajustar" && est.segTxtActivo]}>
-                Fijar valor
-              </Text>
-            </Pressable>
-          </View>
+          );
+        })}
+      </View>
 
-          <Text style={est.ayudaModo}>
-            {modo === "resurtir"
-              ? "¿Cuántas unidades llegaron? Se suman al stock actual."
-              : "¿Cuánto hay en realidad? El stock quedará en ese valor exacto."}
-          </Text>
+      <Txt escala="pie" tono="tenue" estilo={{ marginBottom: T.esps.lg }}>
+        {modo === "resurtir"
+          ? "¿Cuántas unidades llegaron? Se suman al stock actual."
+          : "¿Cuánto hay en realidad? El stock quedará en ese valor exacto."}
+      </Txt>
 
-          <TextInput
-            style={[estiloInput, est.inputGrande]}
-            value={cantidad}
-            onChangeText={setCantidad}
-            keyboardType="decimal-pad"
-            placeholder="0"
-            placeholderTextColor={T.textoTenue}
-            autoFocus
+      <Campo label={modo === "resurtir" ? "Unidades que llegaron" : "Cuántas hay en realidad"}>
+        <TextInput
+          // Sin `fontFamily: T.fuente.num`: esa familia está declarada en
+          // apariencia.ts como "SOLO para montos de dinero", y esto es una
+          // cantidad de piezas. El tamaño grande y el centrado ya hacen el
+          // trabajo de que se lea de un vistazo.
+          style={[estiloInput, { fontSize: 26, textAlign: "center", paddingVertical: 16 }]}
+          value={cantidad}
+          onChangeText={setCantidad}
+          keyboardType="decimal-pad"
+          placeholder="0"
+          placeholderTextColor={T.textoTenue}
+          autoFocus
+        />
+      </Campo>
+
+      {/* Vista previa. Antes era una caja con filo de color y las cifras en
+          texto normal; ahora los números van en <Monto> como en el resto de
+          la app, y el resultado se distingue por TONO (peligro si queda
+          negativo, éxito si no), no por un borde de otro color. */}
+      {hayEntrada ? (
+        <View
+          style={{
+            flexDirection: "row",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: T.esps.sm,
+            backgroundColor: T.superficie,
+            borderRadius: T.radio,
+            paddingVertical: T.esps.lg,
+            marginBottom: T.esps.xl,
+          }}
+        >
+          <Monto
+            texto={fmtStock(producto.stock, producto.unidad)}
+            escala="cuerpo"
+            tono="suave"
           />
+          <Txt escala="cuerpo" tono="tenue">
+            →
+          </Txt>
+          <Monto
+            texto={fmtStock(resultado, producto.unidad)}
+            escala="titulo"
+            tono={resultado < 0 ? "peligro" : "exito"}
+          />
+        </View>
+      ) : null}
 
-          {/* Vista previa */}
-          {hayEntrada && (
-            <View style={est.previa}>
-              <Text style={est.previaTxt}>
-                {fmtStock(producto.stock, producto.unidad)} →{" "}
-                <Text
-                  style={{
-                    color: resultado < 0 ? T.peligro : T.turquesa,
-                    fontWeight: "800",
-                  }}
-                >
-                  {fmtStock(resultado, producto.unidad)}
-                </Text>
-              </Text>
-            </View>
-          )}
+      {historial.length > 0 ? (
+        <>
+          <Txt
+            escala="micro"
+            tono="suave"
+            fuerte
+            mayus
+            estilo={{ marginBottom: T.esps.sm }}
+          >
+            Movimientos recientes
+          </Txt>
+          <Grupo>
+            {historial.map((m, i) => (
+              <Fila
+                key={i}
+                titulo={MOTIVOS[m.motivo] ?? m.motivo}
+                meta={fmtFecha(m.creado_en)}
+                flecha={false}
+                valor={
+                  <Monto
+                    texto={`${fmtStock(m.stock_antes, "")} → ${fmtStock(m.stock_despues, "")}`}
+                    escala="pie"
+                    tono="suave"
+                  />
+                }
+              />
+            ))}
+          </Grupo>
+        </>
+      ) : null}
 
-          <Boton titulo="Aplicar" onPress={aplicar} cargando={guardando} />
-
-          {/* Historial */}
-          {historial.length > 0 && (
-            <View style={est.histCaja}>
-              <Text style={est.histTitulo}>Movimientos recientes</Text>
-              {historial.map((m, i) => (
-                <View key={i} style={est.histFila}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={est.histMotivo}>{MOTIVOS[m.motivo] ?? m.motivo}</Text>
-                    <Text style={est.histFecha}>{fmtFecha(m.creado_en)}</Text>
-                  </View>
-                  <Text style={est.histCambio}>
-                    {fmtStock(m.stock_antes, "")} → {fmtStock(m.stock_despues, "")}
-                  </Text>
-                </View>
-              ))}
-            </View>
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    </Modal>
+      <View style={{ height: T.esps.xxl }} />
+    </Hoja>
   );
-}
-
-function crearEstilos(T: Tema) {
-  return StyleSheet.create({
-  raiz: { flex: 1, backgroundColor: T.fondo },
-  cuerpo: { padding: T.esp, paddingBottom: 60 },
-  prodCaja: {
-    backgroundColor: T.superficie,
-    borderRadius: T.radio,
-    borderWidth: 1,
-    borderColor: T.borde,
-    padding: 16,
-    marginBottom: 16,
-  },
-  prodNombre: { color: T.texto, fontSize: 17, fontWeight: "800" },
-  prodStock: { color: T.textoSuave, fontSize: 14, marginTop: 4 },
-  segmento: {
-    flexDirection: "row",
-    backgroundColor: T.superficie,
-    borderRadius: T.radioChico + 2,
-    borderWidth: 1,
-    borderColor: T.borde,
-    padding: 4,
-    marginBottom: 10,
-  },
-  segBtn: { flex: 1, paddingVertical: 11, borderRadius: T.radioChico - 2, alignItems: "center" },
-  segActivo: { backgroundColor: T.acento },
-  segTxt: { color: T.textoSuave, fontSize: 14, fontWeight: "600" },
-  segTxtActivo: { color: T.acentoTexto, fontWeight: "800" },
-  ayudaModo: { color: T.textoTenue, fontSize: 13, marginBottom: 12, lineHeight: 18 },
-  inputGrande: {
-    fontSize: 28,
-    fontWeight: "800",
-    textAlign: "center",
-    paddingVertical: 16,
-    marginBottom: 12,
-  },
-  previa: {
-    backgroundColor: T.superficie,
-    borderRadius: T.radioChico,
-    borderWidth: 1,
-    borderColor: T.borde,
-    borderLeftWidth: 4,
-    borderLeftColor: T.acento,
-    paddingVertical: 12,
-    alignItems: "center",
-    marginBottom: 16,
-  },
-  previaTxt: { color: T.texto, fontSize: 16 },
-  histCaja: { marginTop: 28 },
-  histTitulo: {
-    color: T.textoSuave,
-    fontSize: 12,
-    fontWeight: "800",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-    marginBottom: 10,
-  },
-  histFila: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: T.superficie,
-    borderRadius: T.radioChico,
-    borderWidth: 1,
-    borderColor: T.borde,
-    padding: 12,
-    marginBottom: 7,
-  },
-  histMotivo: { color: T.texto, fontSize: 13, fontWeight: "600" },
-  histFecha: { color: T.textoTenue, fontSize: 11, marginTop: 1 },
-  histCambio: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
-  });
 }

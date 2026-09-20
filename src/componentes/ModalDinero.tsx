@@ -35,10 +35,11 @@
 // 6. BackHandler para el drill-down (panel -> form/fijos/presupuestos).
 
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { View, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, BackHandler } from "react-native";
+import { View, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, ActivityIndicator, BackHandler } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { Boton, Banner, CabeceraModal, Campo, Hoja, Lamina, Txt, Monto, useEstiloInput } from "@/src/componentes/ui";
+import BotonYaxo from "@/src/componentes/BotonYaxo";
 import { IconoUI } from "@/src/componentes/iconos";
 import { pesos } from "@/src/base/formato";
 import { turnoActivo, type Turno } from "@/src/base/venta";
@@ -266,11 +267,32 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   // Panel principal
   // ---------------------------------------------------------------------------
 
-  function Panel() {
+  // LOS BLOQUES DE ABAJO SON FUNCIONES, NO COMPONENTES — Y ES A PROPOSITO
+  // ------------------------------------------------------------------------
+  // Antes eran `function Panel()` y se montaban como `<Panel />`. Al
+  // escribir en cualquier campo, cada letra cambiaba el estado, este modal se
+  // volvia a renderizar, y JavaScript creaba una funcion `Panel` NUEVA:
+  // identica en codigo, distinta en identidad. React lo lee como "otro
+  // componente", no como el mismo actualizado: desmonta el subarbol entero y
+  // monta uno nuevo. El TextInput con el foco dejaba de existir y Android
+  // cerraba el teclado, obligando a teclear letra por letra.
+  //
+  // Llamandolas como funciones (`renderPanel()`), el JSX queda inlineado
+  // en el render del padre: React compara View / TextInput / ScrollView, que
+  // son tipos estables. No hay remontaje y el foco sobrevive.
+  //
+  // Dos reglas para no repetirlo:
+  //  1. Ninguna de estas puede usar hooks. Hoy ninguna los usa. Si alguna
+  //     llegara a necesitar useState, NO basta con volverla componente
+  //     interno otra vez: hay que sacarla a nivel de modulo y pasarle lo que
+  //     necesite por props.
+  //  2. Al llamarlas dentro de JSX hay que envolverlas en llaves:
+  //     {renderPanel()}. Sin llaves, React imprime el texto literal.
+  function renderPanel() {
     if (cargando || !r) {
       return <ActivityIndicator color={T.acento} style={{ marginTop: T.esps.xxl }} />;
     }
-    if (!r.hay_datos) return <Arranque />;
+    if (!r.hay_datos) return renderArranque();
 
     const esNegocio = ambito === "negocio";
     return (
@@ -294,9 +316,9 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
           </View>
         ))}
 
-        {esNegocio ? <HeroNegocio /> : <HeroPersonal />}
+        {esNegocio ? renderHeroNegocio() : renderHeroPersonal()}
 
-        <Calendario />
+        {renderCalendario()}
 
         {r.proximos_fijos.length > 0 && (
           <Bloque titulo="Por pagar">
@@ -359,7 +381,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
         )}
 
         <Bloque titulo={diaAbierto ? `Movimientos del ${diaAbierto.slice(8)}` : "Últimos movimientos"}>
-          <Movimientos />
+          {renderMovimientos()}
         </Bloque>
 
         <View style={{ height: 90 }} />
@@ -371,7 +393,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   // balance del mes en el libro personal). Mismo tratamiento "con luz" que
   // "Vendido hoy" en Inicio — antes era una caja con borde de color, sin
   // ese peso visual.
-  function HeroNegocio() {
+  function renderHeroNegocio() {
     if (!r) return null;
     const gano = r.ganancia_hoy_centavos >= 0;
     const cubierto = r.falta_hoy_centavos <= 0;
@@ -428,20 +450,20 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
         </View>
 
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.sm, marginBottom: T.esps.xs }}>
-          <Mini lbl="Ventas del mes" val={pesos(r.ventas_mes_centavos)} />
-          <Mini lbl="Gastos del mes" val={pesos(r.gastos_mes_centavos)} />
-          <Mini
-            lbl="Ganancia del mes"
-            val={(r.ganancia_mes_centavos < 0 ? "−" : "") + pesos(Math.abs(r.ganancia_mes_centavos))}
-            tono={r.ganancia_mes_centavos >= 0 ? "exito" : "peligro"}
-          />
-          {r.retiros_mes_centavos > 0 && <Mini lbl="Sacaste para ti" val={pesos(r.retiros_mes_centavos)} />}
+          {renderMini({ lbl: "Ventas del mes", val: pesos(r.ventas_mes_centavos) })}
+          {renderMini({ lbl: "Gastos del mes", val: pesos(r.gastos_mes_centavos) })}
+          {renderMini({
+            lbl: "Ganancia del mes",
+            val: (r.ganancia_mes_centavos < 0 ? "−" : "") + pesos(Math.abs(r.ganancia_mes_centavos)),
+            tono: r.ganancia_mes_centavos >= 0 ? "exito" : "peligro",
+          })}
+          {r.retiros_mes_centavos > 0 && renderMini({ lbl: "Sacaste para ti", val: pesos(r.retiros_mes_centavos) })}
         </View>
       </>
     );
   }
 
-  function HeroPersonal() {
+  function renderHeroPersonal() {
     if (!r) return null;
     const bien = r.balance_mes_centavos >= 0;
     return (
@@ -488,15 +510,15 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
           </View>
         )}
         <View style={{ flexDirection: "row", flexWrap: "wrap", gap: T.esps.sm, marginBottom: T.esps.xs }}>
-          <Mini lbl="Ingresos del mes" val={pesos(r.ingresos_mes_centavos)} />
-          <Mini lbl="Gastos del mes" val={pesos(r.gastos_mes_centavos)} />
-          <Mini lbl="A este ritmo, el mes" val={pesos(r.proyeccion_mes_centavos)} />
+          {renderMini({ lbl: "Ingresos del mes", val: pesos(r.ingresos_mes_centavos) })}
+          {renderMini({ lbl: "Gastos del mes", val: pesos(r.gastos_mes_centavos) })}
+          {renderMini({ lbl: "A este ritmo, el mes", val: pesos(r.proyeccion_mes_centavos) })}
         </View>
       </>
     );
   }
 
-  function Mini({ lbl, val, tono }: { lbl: string; val: string; tono?: "exito" | "peligro" }) {
+  function renderMini({ lbl, val, tono }: { lbl: string; val: string; tono?: "exito" | "peligro" }) {
     return (
       <View
         style={{
@@ -517,7 +539,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function Calendario() {
+  function renderCalendario() {
     if (!r || r.calendario.length === 0) return null;
     const maxG = Math.max(1, ...r.calendario.map((d) => d.gastos_centavos));
     const primera = new Date(r.calendario[0].fecha + "T12:00:00");
@@ -578,7 +600,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function Movimientos() {
+  function renderMovimientos() {
     const lista = diaAbierto ? movs.filter((m) => m.fecha === diaAbierto) : movs.slice(0, 12);
     if (lista.length === 0) {
       return (
@@ -618,7 +640,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function Arranque() {
+  function renderArranque() {
     const esNegocio = ambito === "negocio";
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
@@ -656,7 +678,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   // Formulario
   // ---------------------------------------------------------------------------
 
-  function Form() {
+  function renderForm() {
     const cats = clase === "gasto" ? CATS_GASTO[ambito] : CATS_INGRESO[ambito];
     const esRetiro = clase === "gasto" && ambito === "negocio" && categoria === "retiro";
     return (
@@ -765,7 +787,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   // Gastos fijos
   // ---------------------------------------------------------------------------
 
-  function Fijos() {
+  function renderFijos() {
     const total = fijos.reduce((s, f) => s + f.monto_centavos, 0);
     const cats = CATS_GASTO[ambito].filter((c) => c.id !== "retiro");
     return (
@@ -867,7 +889,7 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   // Presupuestos
   // ---------------------------------------------------------------------------
 
-  function Presupuestos() {
+  function renderPresupuestos() {
     const cats = CATS_GASTO[ambito].filter((c) => c.id !== "retiro");
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
@@ -911,8 +933,40 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
       <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
-          <CabeceraModal titulo={cab.titulo} izquierda={cab.izq} onIzquierda={cab.onIzq} />
+        <KeyboardAvoidingView style={{ flex: 1 }} // "padding" en las DOS plataformas.
+              //
+              // Antes: Platform.OS === "ios" ? "padding" : undefined. En
+              // Android eso era literalmente NINGUNA evitación de teclado. Era
+              // correcto cuando `softwareKeyboardLayoutMode: "resize"`
+              // redimensionaba la ventana, pero con `edgeToEdgeEnabled: true`
+              // la ventana ya no se encoge: la app dibuja por debajo del
+              // teclado, y los campos quedaban tapados.
+              //
+              // NO "height", que es la otra tentación: anima la altura del
+              // contenedor y pelea con la animación del sistema, así que el
+              // contenido rebota al cerrarse el teclado. Ya se probó.
+              behavior="padding">
+          <CabeceraModal
+            titulo={cab.titulo}
+            izquierda={cab.izq}
+            onIzquierda={cab.onIzq}
+            /* Acceso a Yaxo SOLO en el panel: dentro de un formulario de gasto
+               el hueco derecho es de "Guardar", y quitárselo para poner al
+               asistente sería cambiar una acción por una consulta.
+
+               CIERRA DINERO ANTES DE ABRIR. No es un capricho: este modal se
+               dibuja por encima de la vista raíz, y la pantalla de Yaxo se
+               carga dentro de ella. Sin cerrar, el usuario tocaría el botón y
+               no pasaría nada visible.
+
+               Efecto secundario que conviene conocer: al volver de Yaxo se
+               aterriza en Inicio, no en Dinero. Es de donde se abrió Dinero,
+               así que coincide con el camino de vuelta de siempre, pero se
+               pierde el ámbito (negocio/personal) que estuviera elegido. */
+            derechaNodo={
+              vista === "panel" ? <BotonYaxo desde="dinero" size={26} antesDeAbrir={onCerrar} /> : undefined
+            }
+          />
 
           {vista === "panel" && (
             <View style={{ flexDirection: "row", gap: T.esps.sm, paddingHorizontal: T.esp, paddingBottom: T.esps.xs }}>
@@ -938,10 +992,10 @@ export default function ModalDinero({ onCerrar }: { onCerrar: () => void }) {
             </View>
           )}
 
-          {vista === "panel" && <Panel />}
-          {vista === "form" && <Form />}
-          {vista === "fijos" && <Fijos />}
-          {vista === "presupuestos" && <Presupuestos />}
+          {vista === "panel" && renderPanel()}
+          {vista === "form" && renderForm()}
+          {vista === "fijos" && renderFijos()}
+          {vista === "presupuestos" && renderPresupuestos()}
 
           {vista === "panel" && r?.hay_datos && (
             <View

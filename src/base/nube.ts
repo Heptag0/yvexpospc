@@ -31,6 +31,31 @@ const CLAVES = [
   "prefijo_folio",
 ];
 
+/** Identidad de ESTA instalación. A diferencia de `dispositivo_id`, NO se
+ *  borra al desvincular: es lo que permite al servidor reconocer que este
+ *  teléfono ya tuvo una caja y devolverle la suya, con su misma serie de
+ *  folio, en vez de crear una nueva cada vez.
+ *
+ *  Deliberadamente FUERA de CLAVES (la lista que borra cerrarSesion): si se
+ *  borrara, el servidor no podría reconocer nada y volveríamos a quemar una
+ *  letra por cada vinculación, hasta agotar el abecedario. */
+const CLAVE_INSTALACION = "instalacion_uid";
+
+async function instalacionUid(): Promise<string> {
+  const m = await leerVarias([CLAVE_INSTALACION]);
+  const guardado = (m.get(CLAVE_INSTALACION) ?? "").trim();
+  if (guardado) return guardado;
+  // Primer arranque de esta instalación: se genera y se guarda para siempre.
+  // Sin dependencias: 32 hex de Math.random bastan — no es un secreto, solo
+  // necesita ser distinto entre teléfonos.
+  let uid = "";
+  for (let i = 0; i < 32; i++) {
+    uid += Math.floor(Math.random() * 16).toString(16);
+  }
+  await guardarConfig(CLAVE_INSTALACION, uid);
+  return uid;
+}
+
 export type EstadoCuenta = {
   vinculado: boolean;
   email: string | null;
@@ -137,7 +162,11 @@ async function vincularDispositivo(
   nombreCaja: string
 ): Promise<VincularResp> {
   return pedir<VincularResp>("/vincular/directo", {
-    cuerpo: { nombre_caja: nombreCaja, tipo: "movil" },
+    cuerpo: {
+      nombre_caja: nombreCaja,
+      tipo: "movil",
+      instalacion_uid: await instalacionUid(),
+    },
     token: sesionToken,
   });
 }

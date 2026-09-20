@@ -46,7 +46,7 @@
 //    retroceder un nivel.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { View, Text, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Share, BackHandler } from "react-native";
+import { View, Text, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, ActivityIndicator, Share, BackHandler } from "react-native";
 import Svg, { Polygon, Rect, Text as SvgText } from "react-native-svg";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
@@ -271,7 +271,25 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────────── Lista
 
-  function VistaLista() {
+  // LAS SEIS VISTAS SON FUNCIONES, NO COMPONENTES — Y ESO ES A PROPÓSITO
+  // ------------------------------------------------------------------------
+  // Antes eran `function VistaCalc()` y se montaban como `<VistaCalc />`. Al
+  // escribir en cualquier campo, cada letra llamaba a `set(...)`, el modal se
+  // volvía a renderizar, y JavaScript creaba una función `VistaCalc` NUEVA —
+  // idéntica en código, distinta en identidad. React lo lee como "otro
+  // componente", no como el mismo actualizado: desmonta el subárbol entero y
+  // monta uno nuevo. El TextInput con el foco dejaba de existir y Android
+  // cerraba el teclado. Había que tocar el campo por cada letra.
+  //
+  // Llamándolas como funciones (`vistaCalc()`), el JSX queda inlineado en el
+  // render del padre: React compara View / TextInput / ScrollView, que son
+  // estables. No hay remontaje y el foco sobrevive.
+  //
+  // Ninguna de las seis usa hooks, por eso el cambio es seguro. Si alguna
+  // llegara a necesitar useState o useEffect, NO basta con volver a
+  // convertirla en componente interno: hay que sacarla a nivel de módulo y
+  // pasarle lo que necesite por props.
+  function vistaLista() {
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
         <View
@@ -355,7 +373,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────── Calculadora
 
-  function VistaCalc() {
+  function vistaCalc() {
     const exento = (p.exencion ?? "ninguna") !== "ninguna";
     const u = p.tipo === "liquido" ? "ml" : "g";
     return (
@@ -442,7 +460,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
         )}
 
         {/* Resultado, siempre visible bajo los campos */}
-        <Resultado />
+        {renderResultado()}
 
         {/* Lo avanzado no estorba: se despliega solo si lo piden */}
         <Pressable onPress={() => setAvanzado((v) => !v)} style={{ paddingVertical: T.esps.md, alignItems: "center" }}>
@@ -498,7 +516,10 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function Resultado() {
+  // Mismo motivo que las vistas de arriba: funcion, no componente. Este se
+  // escapo en la primera pasada y dejaba la pantalla de NOM-051 con el bug
+  // a medias. Se llama con llaves: {renderResultado()}.
+  function renderResultado() {
     const r = resultado;
     if (r.motivo === "exento" || r.motivo === "sin_anadidos") {
       return (
@@ -616,7 +637,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────── Mejorar
 
-  function VistaMejorar() {
+  function vistaMejorar() {
     const { sugerencias, quedariaLimpio, leyendasFijas } = sugerenciasParaQuitarSellos(datos);
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
@@ -707,7 +728,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────── Etiqueta
 
-  function VistaEtiqueta() {
+  function vistaEtiqueta() {
     const u = p.tipo === "liquido" ? "ml" : "g";
     const campo = (k: keyof PerfilEtiqueta, label: string, ph: string, multi = false) => (
       <Campo label={label}>
@@ -783,7 +804,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────── Checklist
 
-  function VistaChecklist() {
+  function vistaChecklist() {
     const tiene: Record<string, boolean> = {
       denominacion: !!p.denominacion, ingredientes: !!p.ingredientes,
       alergenos: !!p.alergenos, contenido: !!p.contenido_neto,
@@ -826,7 +847,7 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
 
   // ─────────────────────────────────────────────────────── Trámites
 
-  function VistaTramites() {
+  function vistaTramites() {
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
         <View style={{ padding: T.esps.md, borderRadius: T.radio, marginBottom: T.esps.lg, backgroundColor: T.acentoSuave, borderWidth: 1, borderColor: T.acento + "55" }}>
@@ -872,15 +893,27 @@ export default function ModalEtiquetas({ onCerrar }: { onCerrar: () => void }) {
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
       <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1 }} // "padding" en las DOS plataformas.
+              //
+              // Antes: Platform.OS === "ios" ? "padding" : undefined. En
+              // Android eso era literalmente NINGUNA evitación de teclado. Era
+              // correcto cuando `softwareKeyboardLayoutMode: "resize"`
+              // redimensionaba la ventana, pero con `edgeToEdgeEnabled: true`
+              // la ventana ya no se encoge: la app dibuja por debajo del
+              // teclado, y los campos quedaban tapados.
+              //
+              // NO "height", que es la otra tentación: anima la altura del
+              // contenedor y pelea con la animación del sistema, así que el
+              // contenido rebota al cerrarse el teclado. Ya se probó.
+              behavior="padding">
           <CabeceraModal titulo={cab.t} izquierda={cab.i} onIzquierda={cab.f} />
 
-          {vista === "lista" && <VistaLista />}
-          {vista === "calc" && <VistaCalc />}
-          {vista === "mejorar" && <VistaMejorar />}
-          {vista === "etiqueta" && <VistaEtiqueta />}
-          {vista === "checklist" && <VistaChecklist />}
-          {vista === "tramites" && <VistaTramites />}
+          {vista === "lista" && vistaLista()}
+          {vista === "calc" && vistaCalc()}
+          {vista === "mejorar" && vistaMejorar()}
+          {vista === "etiqueta" && vistaEtiqueta()}
+          {vista === "checklist" && vistaChecklist()}
+          {vista === "tramites" && vistaTramites()}
 
           {/* Barra de acciones: solo en las vistas de trabajo */}
           {(vista === "calc" || vista === "etiqueta" || vista === "checklist") && (

@@ -39,6 +39,42 @@ import { View, Text, Image, StyleSheet } from "react-native";
 import { Icono } from "@/src/componentes/iconos";
 import { useTema } from "@/src/componentes/TemaProvider";
 
+/** Palabras que NO identifican a un producto: cantidad, envase, presentación.
+ *  Se saltan al elegir la inicial del medallón.
+ *
+ *  Por qué existe esta lista: un catálogo de bebidas se llama "6 Bote Corona
+ *  Extra", "6 Bote Modelo Especial", "24 Media Pacífico". Tomando el primer
+ *  carácter, TODOS los medallones mostraban un "6" — el dato menos
+ *  distintivo del nombre, repetido en pantallas enteras. Saltando cantidad y
+ *  envase queda "C" de Corona, "M" de Modelo, "P" de Pacífico, que sí
+ *  distinguen.
+ *
+ *  Deliberadamente corta y solo de envases/medidas comunes en México: cuanto
+ *  más larga, más probable que se coma una palabra que sí identificaba algo.
+ *  Si ninguna palabra sobrevive al filtro, se usa la primera del nombre tal
+ *  cual — nunca se queda sin inicial. */
+const PALABRAS_NO_DISTINTIVAS = new Set([
+  "bote", "botella", "lata", "caja", "media", "six", "pack", "paquete",
+  "bolsa", "kg", "gr", "g", "ml", "lt", "l", "litro", "litros", "pieza",
+  "piezas", "pza", "pzas", "de", "el", "la", "los", "las", "un", "una",
+]);
+
+/** Primera letra REAL del nombre, saltando cantidades y envases. */
+function inicialDe(nombre: string): string {
+  const palabras = nombre.trim().split(/\s+/).filter(Boolean);
+  for (const p of palabras) {
+    // Fuera números ("6", "355", "1.5") y unidades pegadas ("600ml").
+    if (/^[\d.,]+[a-zA-Z]{0,3}$/.test(p)) continue;
+    const limpia = p.replace(/[^\p{L}]/gu, "");
+    if (!limpia) continue;
+    if (PALABRAS_NO_DISTINTIVAS.has(limpia.toLowerCase())) continue;
+    return limpia[0].toUpperCase();
+  }
+  // Nada sobrevivió al filtro: la primera letra que haya, como antes.
+  const primera = nombre.trim().replace(/[^\p{L}]/gu, "")[0];
+  return (primera ?? "?").toUpperCase();
+}
+
 function ImagenProductoBase({
   uri,
   nombre,
@@ -110,7 +146,7 @@ function ImagenProductoBase({
       ]}
     >
       <Text style={[est.inicial, { color: T.textoSuave, fontSize: size * 0.36 }]}>
-        {(nombre.trim()[0] ?? "?").toUpperCase()}
+        {inicialDe(nombre)}
       </Text>
     </View>
   );

@@ -11,7 +11,7 @@
 
 import * as SQLite from "expo-sqlite";
 
-const VERSION_ESQUEMA = 28;
+const VERSION_ESQUEMA = 33;
 const NOMBRE_BD = "yvexpos.db";
 
 let _dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
@@ -58,19 +58,119 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
   );
   const actual = fila?.user_version ?? 0;
 
-  if (actual < 1) await db.execAsync(ESQUEMA_V1);
-  if (actual < 2) await db.execAsync(ESQUEMA_V2);
-  if (actual < 3) await db.execAsync(ESQUEMA_V3);
-  if (actual < 4) await db.execAsync(ESQUEMA_V4);
-  if (actual < 5) await db.execAsync(ESQUEMA_V5);
-  if (actual < 6) await db.execAsync(ESQUEMA_V6);
-  if (actual < 7) await db.execAsync(ESQUEMA_V7);
-  if (actual < 8) await db.execAsync(ESQUEMA_V8);
-  if (actual < 9) await db.execAsync(ESQUEMA_V9);
-  if (actual < 10) await db.execAsync(ESQUEMA_V10);
-  if (actual < 11) await db.execAsync(ESQUEMA_V11);
-  if (actual < 12) await db.execAsync(ESQUEMA_V12);
-  if (actual < 13) await db.execAsync(ESQUEMA_V13);
+  // Marca la versión TRAS CADA migración, no solo al final.
+  //
+  // Antes, `PRAGMA user_version` se escribía una sola vez al terminar todo.
+  // Si una migración intermedia fallaba de verdad (no un "duplicate column",
+  // que ya está protegido, sino un error real), las anteriores YA habían
+  // corrido pero la versión seguía en el valor viejo: el siguiente arranque
+  // las repetía todas desde cero. Hoy eso se aguanta porque cada paso es
+  // idempotente, pero es suerte, no diseño — y la primera migración futura
+  // que no lo sea reproduciría el bloqueo total de la app que ya vivimos.
+  // Marcando paso a paso, un fallo en la v29 deja la base en v28 y el
+  // siguiente arranque continúa desde ahí en vez de empezar de nuevo.
+  const marcar = async (v: number) => {
+    await db.execAsync(`PRAGMA user_version = ${v};`);
+  };
+
+  if (actual < 1) {
+    await db.execAsync(ESQUEMA_V1);
+    await marcar(1);
+  }
+  if (actual < 2) {
+    // Antes: este ALTER TABLE vivía dentro de ESQUEMA_V2 sin protección —
+    // era la causa exacta del bloqueo total de la app (ver la nota grande
+    // al final de esta función). Aparte y protegido, como los de v14+.
+    try {
+      await db.execAsync(
+        "ALTER TABLE productos ADD COLUMN es_kit INTEGER NOT NULL DEFAULT 0;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await db.execAsync(ESQUEMA_V2);
+    await marcar(2);
+  }
+  if (actual < 3) {
+    try {
+      await db.execAsync("ALTER TABLE productos ADD COLUMN imagen_uri TEXT;");
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await marcar(3);
+  }
+  if (actual < 4) {
+    try {
+      await db.execAsync("ALTER TABLE categorias ADD COLUMN icono TEXT;");
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await marcar(4);
+  }
+  if (actual < 5) {
+    await db.execAsync(ESQUEMA_V5);
+    await marcar(5);
+  }
+  if (actual < 6) {
+    await db.execAsync(ESQUEMA_V6);
+    // Dependen de que usuarios_pos ya exista (se acaba de crear arriba),
+    // por eso van después del bloque, no antes como en v2/v7.
+    for (const tabla of ["ventas", "caja_sesiones"]) {
+      try {
+        await db.execAsync(
+          `ALTER TABLE ${tabla} ADD COLUMN usuario_pos_id TEXT REFERENCES usuarios_pos(id);`
+        );
+      } catch {
+        // La columna ya existía: no pasa nada, seguimos.
+      }
+    }
+    await marcar(6);
+  }
+  if (actual < 7) {
+    // Mismo motivo que la v2: estos 3 ALTER TABLE vivían sin protección
+    // dentro de ESQUEMA_V7. Cada uno en su propio try/catch — si van
+    // juntos en una sola cadena y el primero choca, los otros dos ni se
+    // intentan.
+    for (const col of ["productos", "categorias", "ventas"]) {
+      try {
+        await db.execAsync(
+          `ALTER TABLE ${col} ADD COLUMN origen TEXT NOT NULL DEFAULT 'local';`
+        );
+      } catch {
+        // La columna ya existía: no pasa nada, seguimos.
+      }
+    }
+    await db.execAsync(ESQUEMA_V7);
+    await marcar(7);
+  }
+  if (actual < 8) {
+    await db.execAsync(ESQUEMA_V8);
+    await marcar(8);
+  }
+  if (actual < 9) {
+    await db.execAsync(ESQUEMA_V9);
+    await marcar(9);
+  }
+  if (actual < 10) {
+    try {
+      await db.execAsync("ALTER TABLE alias_ticket ADD COLUMN piezas_empaque INTEGER;");
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await marcar(10);
+  }
+  if (actual < 11) {
+    await db.execAsync(ESQUEMA_V11);
+    await marcar(11);
+  }
+  if (actual < 12) {
+    await db.execAsync(ESQUEMA_V12);
+    await marcar(12);
+  }
+  if (actual < 13) {
+    await db.execAsync(ESQUEMA_V13);
+    await marcar(13);
+  }
   if (actual < 14) {
     // ALTER TABLE no es idempotente: si la columna ya existe (reinstalación
     // rara con user_version atrasado), SQLite lanza error y la migración
@@ -82,6 +182,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
       // La columna ya existía: no pasa nada, seguimos.
     }
     await db.execAsync(ESQUEMA_V14);
+    await marcar(14);
   }
   if (actual < 15) {
     // Correo del cliente (opcional): servirá después para promociones.
@@ -91,6 +192,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(15);
   }
 
   if (actual < 16) {
@@ -106,11 +208,21 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(16);
   }
 
-  if (actual < 17) await db.execAsync(ESQUEMA_V17);
-  if (actual < 18) await db.execAsync(ESQUEMA_V18);
-  if (actual < 19) await db.execAsync(ESQUEMA_V19);
+  if (actual < 17) {
+    await db.execAsync(ESQUEMA_V17);
+    await marcar(17);
+  }
+  if (actual < 18) {
+    await db.execAsync(ESQUEMA_V18);
+    await marcar(18);
+  }
+  if (actual < 19) {
+    await db.execAsync(ESQUEMA_V19);
+    await marcar(19);
+  }
   if (actual < 20) {
     // v20 — Categoría de receta, para saber qué tan seguro es sugerir bajar
     // un ingrediente sin arriesgar la conservación del producto.
@@ -121,6 +233,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(20);
   }
 
   if (actual < 21) {
@@ -135,6 +248,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(21);
   }
 
   if (actual < 22) {
@@ -152,6 +266,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(22);
   }
 
   if (actual < 23) {
@@ -184,6 +299,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
       // La columna ya existía: no pasa nada, seguimos.
     }
     await db.execAsync(ESQUEMA_V23);
+    await marcar(23);
   }
 
   if (actual < 24) {
@@ -215,6 +331,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(24);
   }
 
   if (actual < 25) {
@@ -238,10 +355,12 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(25);
   }
 
   if (actual < 26) {
     await db.execAsync(ESQUEMA_V26);
+    await marcar(26);
   }
 
   if (actual < 27) {
@@ -257,6 +376,7 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
     } catch {
       // La columna ya existía: no pasa nada, seguimos.
     }
+    await marcar(27);
   }
 
   if (actual < 28) {
@@ -294,9 +414,185 @@ async function migrar(db: SQLite.SQLiteDatabase): Promise<void> {
       // La columna ya existía: no pasa nada, seguimos.
     }
     await db.execAsync(ESQUEMA_V28);
+    await marcar(28);
+  }
+
+  // v29 — kit_componentes sincronizable.
+  //
+  // La tabla existía desde v2 en las dos plataformas, pero NADIE la encolaba
+  // y el servidor no la conocía. El kit llegaba al otro dispositivo marcado
+  // como kit pero VACÍO: no se podía editar, y venderlo NO DESCONTABA NADA
+  // del inventario (el kit no tiene stock propio, se deriva de sus piezas).
+  //
+  // `eliminado` es imprescindible para poder sincronizarla: editar un kit
+  // REEMPLAZA su lista de componentes, y con borrado duro el otro dispositivo
+  // nunca se entera de que quitaste una pieza — se queda con la lista vieja
+  // y descuenta stock de más.
+  if (actual < 29) {
+    for (const sql of [
+      "ALTER TABLE kit_componentes ADD COLUMN eliminado INTEGER NOT NULL DEFAULT 0;",
+      "ALTER TABLE kit_componentes ADD COLUMN actualizado_en TEXT;",
+    ]) {
+      try {
+        await db.execAsync(sql);
+      } catch {
+        // La columna ya existía: no pasa nada, seguimos.
+      }
+    }
+    await db.execAsync(
+      "CREATE INDEX IF NOT EXISTS idx_kit_comp_vivo ON kit_componentes(kit_id, eliminado);"
+    );
+    await marcar(29);
+  }
+
+  // v30 — `origen` en cotizaciones, para que el folio sea de ESTA caja.
+  //
+  // Las cotizaciones SÍ sincronizan, así que la tabla acaba mezclando las
+  // propias con las bajadas de otras cajas. Sin poder distinguirlas,
+  // `MAX(folio)` tomaba también las ajenas y el folio saltaba a la serie del
+  // PC en cuanto se sincronizaba — el mismo fallo que tenía el folio de
+  // ventas. `ventas` ya resolvía esto con una columna `origen`; se replica.
+  if (actual < 30) {
+    try {
+      await db.execAsync(
+        "ALTER TABLE cotizaciones ADD COLUMN origen TEXT NOT NULL DEFAULT 'local';"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await marcar(30);
+  }
+
+  // v31 — IVA por producto. Puerto de `productos.iva_tasa` del PC: un
+  // PORCENTAJE entero (0 o 16), NO puntos base — la conversión a puntos
+  // base para el cálculo real del impuesto vive en
+  // impuestos.ts::puntosBaseDesdePct(), nunca aquí.
+  //
+  // El PC ya tenía esta columna y ya la manda en cada bajada (sync_bajar.py);
+  // el móvil la recibía y la IGNORABA a propósito (ver el comentario viejo
+  // en sync.ts::bajar()) porque no tenía dónde guardarla. Con esta columna,
+  // prepararTrasVincular() y bajar() dejan de descartarla.
+  //
+  // SQLite no permite añadir un CHECK con ALTER TABLE sobre una tabla ya
+  // creada (a diferencia del CHECK (iva_tasa IN (0,16)) que sí tiene el PC
+  // desde su esquema inicial) — la validación 0/16 se hace en
+  // inventario.ts::validar(), a nivel de aplicación.
+  if (actual < 31) {
+    try {
+      await db.execAsync(
+        "ALTER TABLE productos ADD COLUMN iva_tasa INTEGER NOT NULL DEFAULT 0;"
+      );
+    } catch {
+      // La columna ya existía: no pasa nada, seguimos.
+    }
+    await marcar(31);
+  }
+
+  // v32 — Tablas espejo de devoluciones. Puerto exacto de 001_inicial.sql +
+  // 003_metodo_reembolso.sql del PC: mismas columnas, mismos tipos.
+  //
+  // El servidor YA manda estas dos entidades en cada bajada — el móvil las
+  // recibía y las DESCARTABA a propósito (ver el comentario viejo en
+  // sync.ts::bajar()) porque no tenía dónde guardarlas. Sin esto, el corte
+  // del negocio en un teléfono quedaba incompleto en cuanto OTRA caja hacía
+  // una devolución: esas ventas seguían contando su total original completo,
+  // como si nunca se hubieran devuelto.
+  //
+  // Son tablas ESPEJO, solo para lectura/reportes por ahora — el móvil
+  // todavía no CREA devoluciones (eso es una pantalla completa, aparte).
+  // `devolucion_lineas` no lleva `actualizado_en` a propósito: mismo motivo
+  // que en el PC (comentario original en 001_inicial.sql) — no hay conflicto
+  // que resolver en una fila que nunca se actualiza tras crearse.
+  //
+  // Sin claves foráneas declaradas (a diferencia del PC): las filas bajadas
+  // referencian ventas/caja_sesiones de OTRAS cajas que pueden no existir
+  // localmente todavía, y aquí no hay un mecanismo de "usuario espejo" como
+  // en el PC (sync_pull.rs) para rellenar ese hueco. Igual que
+  // ajustes_inventario y kit_componentes ya hacen en este mismo archivo.
+  if (actual < 32) {
+    try {
+      await db.execAsync(`
+        CREATE TABLE IF NOT EXISTS devoluciones (
+          id TEXT PRIMARY KEY,
+          venta_id TEXT NOT NULL,
+          caja_sesion_id TEXT NOT NULL,
+          usuario_pos_id TEXT,
+          motivo TEXT,
+          metodo_reembolso TEXT,
+          total_devuelto_centavos INTEGER NOT NULL,
+          creado_en TEXT NOT NULL,
+          actualizado_en TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_devoluciones_venta ON devoluciones(venta_id);
+        CREATE TABLE IF NOT EXISTS devolucion_lineas (
+          id TEXT PRIMARY KEY,
+          devolucion_id TEXT NOT NULL,
+          venta_linea_id TEXT NOT NULL,
+          cantidad REAL NOT NULL,
+          monto_centavos INTEGER NOT NULL,
+          reingresa_stock INTEGER NOT NULL DEFAULT 1
+        );
+        CREATE INDEX IF NOT EXISTS idx_devolucion_lineas_dev ON devolucion_lineas(devolucion_id);
+      `);
+    } catch {
+      // Las tablas ya existían: no pasa nada, seguimos.
+    }
+    await marcar(32);
+  }
+
+  // v33 — Cobro mixto. Puerto de 001_inicial.sql del PC: `pagos` necesita
+  // `recibido_centavos` (lo que el cliente entregó, solo efectivo),
+  // `cambio_centavos` (por pago, no global) y `actualizado_en` — ninguna
+  // existía en el móvil, aunque `venta.ts::cobrar()` ya las MANDABA en el
+  // payload de `encolar()` desde antes (se perdían al no tener dónde
+  // guardarlas localmente; el servidor las recibía igual, calculadas al
+  // vuelo con el único pago que existía entonces).
+  //
+  // `actualizado_en` no puede ir NOT NULL en el ALTER (SQLite exige un
+  // default para filas existentes si es NOT NULL) — se agrega nullable y se
+  // rellena con `creado_en` para las filas viejas, la mejor aproximación
+  // honesta que hay: nunca se guardó el dato real.
+  if (actual < 33) {
+    try {
+      await db.execAsync("ALTER TABLE pagos ADD COLUMN recibido_centavos INTEGER;");
+    } catch {
+      // Ya existía.
+    }
+    try {
+      await db.execAsync("ALTER TABLE pagos ADD COLUMN cambio_centavos INTEGER;");
+    } catch {
+      // Ya existía.
+    }
+    try {
+      await db.execAsync("ALTER TABLE pagos ADD COLUMN actualizado_en TEXT;");
+    } catch {
+      // Ya existía.
+    }
+    try {
+      await db.execAsync(
+        "UPDATE pagos SET actualizado_en = creado_en WHERE actualizado_en IS NULL;"
+      );
+    } catch {
+      // Nada que rellenar, o la columna no se pudo crear arriba.
+    }
+    await marcar(33);
   }
 
   if (actual < VERSION_ESQUEMA) {
+    // Red final: cubre el caso de subir VERSION_ESQUEMA sin añadir un bloque
+    // nuevo. Cada migración ya marca la suya con marcar(), así que esto
+    // normalmente no cambia nada.
+    //
+    // NOTA HISTÓRICA — ESTE PRAGMA FALTABA POR COMPLETO. migrar() leía user_version pero
+    // nunca lo escribía — cada arranque en frío de la app (Android matando
+    // el proceso y reabriéndolo) creía que la base nunca se había migrado
+    // y volvía a correr las 28 migraciones desde cero. Las CREATE TABLE IF
+    // NOT EXISTS sobreviven porque son repetibles; los ALTER TABLE sin
+    // try/catch (v2, v7) no — la segunda vez que corrían chocaban con
+    // "duplicate column name" y migrar() entero se detenía ahí, dejando la
+    // app sin poder abrir la base nunca más. Con esto, cada migración se
+    // corre una sola vez de verdad.
+    await db.execAsync(`PRAGMA user_version = ${VERSION_ESQUEMA};`);
   }
 }
 
@@ -390,8 +686,6 @@ CREATE INDEX IF NOT EXISTS idx_pagos_venta ON pagos(venta_id);
 // Regla del PC: el stock NUNCA se edita a mano sin dejar rastro. Todo ajuste
 // queda en ajustes_inventario (motivo: 'ajuste', 'resurtido', 'conteo').
 const ESQUEMA_V2 = `
-ALTER TABLE productos ADD COLUMN es_kit INTEGER NOT NULL DEFAULT 0;
-
 CREATE TABLE IF NOT EXISTS kit_componentes (
   id          TEXT PRIMARY KEY,
   kit_id      TEXT NOT NULL REFERENCES productos(id),
@@ -413,14 +707,10 @@ CREATE INDEX IF NOT EXISTS idx_ajustes_prod ON ajustes_inventario(producto_id);
 `;
 
 // v3 — Imagen del producto (POS móvil visual: se vende tocando fotos).
-const ESQUEMA_V3 = `
-ALTER TABLE productos ADD COLUMN imagen_uri TEXT;
-`;
-
 // v4 — Icono del departamento (sus productos lo heredan por defecto).
-const ESQUEMA_V4 = `
-ALTER TABLE categorias ADD COLUMN icono TEXT;
-`;
+// (Los ALTER TABLE de v3/v4 se movieron arriba, a migrar(), protegidos con
+// try/catch — eran de una sola columna cada uno, no necesitaban un bloque
+// de texto aparte.)
 
 // v5 — Cuenta en la nube (opcional; la app funciona igual sin ella).
 // Guardamos DOS tokens distintos, como manda el backend:
@@ -452,9 +742,6 @@ CREATE TABLE IF NOT EXISTS usuarios_pos (
   creado_en      TEXT NOT NULL,
   actualizado_en TEXT NOT NULL
 );
-
-ALTER TABLE ventas ADD COLUMN usuario_pos_id TEXT REFERENCES usuarios_pos(id);
-ALTER TABLE caja_sesiones ADD COLUMN usuario_pos_id TEXT REFERENCES usuarios_pos(id);
 `;
 
 // v7 — Sincronización bidireccional con la nube.
@@ -478,10 +765,6 @@ CREATE TABLE IF NOT EXISTS cola_sync (
   creado_en    TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_cola_entidad ON cola_sync(entidad, entidad_id);
-
-ALTER TABLE productos  ADD COLUMN origen TEXT NOT NULL DEFAULT 'local';
-ALTER TABLE categorias ADD COLUMN origen TEXT NOT NULL DEFAULT 'local';
-ALTER TABLE ventas     ADD COLUMN origen TEXT NOT NULL DEFAULT 'local';
 
 -- Productos archivados al adoptar el catálogo del negocio (no se borran).
 CREATE TABLE IF NOT EXISTS productos_archivados (
@@ -530,9 +813,7 @@ CREATE INDEX IF NOT EXISTS idx_alias_producto ON alias_ticket(producto_id);
 // así que un "PWMOR 600ML NRP" corregido a pack de 6 volvía a salir como 1
 // pieza al re-escanear. piezas_empaque = piezas por empaque recordadas
 // (NULL = pieza suelta; también sirve para DESaprender un pack).
-const ESQUEMA_V10 = `
-ALTER TABLE alias_ticket ADD COLUMN piezas_empaque INTEGER;
-`;
+// (El ALTER TABLE se movió arriba, a migrar(), protegido con try/catch.)
 
 // v11 — Perfil de producto por departamento (memoria del negocio para
 // validación de costos en escaneos futuros). Cada producto confirmado

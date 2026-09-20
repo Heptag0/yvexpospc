@@ -18,6 +18,7 @@ import { ReactNode, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Image,
+  Linking,
   Modal,
   Pressable,
   ScrollView,
@@ -27,6 +28,11 @@ import {
   TextInput,
   View,
 } from "react-native";
+// El KeyboardAvoidingView viene de `react-native-keyboard-controller`, no de
+// React Native: ver el porqué en ui.tsx. Misma API, mismo "padding", pero
+// construido para `edgeToEdgeEnabled`, donde la ventana ya no se redimensiona
+// sola al abrirse el teclado.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as ImagePicker from "expo-image-picker";
 import {
@@ -72,6 +78,10 @@ import {
   listarProductos,
 } from "@/src/base/inventario";
 import { analizarTicket, estadoCuenta } from "@/src/base/nube";
+import {
+  leerConsentimientoEscaner,
+  guardarConsentimientoEscaner,
+} from "@/src/base/config";
 import { aCentavos, aNumero, centavosATexto, pesos } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import {
@@ -92,6 +102,9 @@ type Props = {
 };
 
 type Paso =
+  // Puerta previa: mientras el consentimiento no este dado, el escaner NO se
+  // puede usar. Ver el comentario de vistaConsentimiento.
+  | "consentimiento"
   | "elegir"
   | "previsualizar"
   | "analizando"
@@ -100,6 +113,7 @@ type Paso =
   | "listo";
 
 const TITULOS: Record<Paso, string> = {
+  consentimiento: "Antes de empezar",
   elegir: "Escanear ticket",
   previsualizar: "Revisa la foto",
   analizando: "Analizando…",
@@ -175,7 +189,12 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
   const est = useMemo(() => crearEstilos(T), [T]);
   const estInput = useEstiloInput();
 
-  const [paso, setPaso] = useState<Paso>("elegir");
+  // Arranca en la puerta, NO en "elegir". Si arrancara en "elegir" habria un
+  // fotograma en el que los botones de camara y galeria son pulsables antes de
+  // que el efecto lea la decision guardada — y con un toque rapido se podria
+  // mandar una foto sin haber aceptado nunca.
+  const [paso, setPaso] = useState<Paso>("consentimiento");
+  const [guardandoConsent, setGuardandoConsent] = useState(false);
   const [vinculado, setVinculado] = useState<boolean | null>(null);
   const [error, setError] = useState("");
   const [fotoUri, setFotoUri] = useState<string | null>(null);
@@ -202,6 +221,29 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
   useEffect(() => {
     estadoCuenta().then((c) => setVinculado(c.vinculado));
   }, []);
+
+  // Si ya acepto antes, se salta la puerta y entra directo a "elegir".
+  useEffect(() => {
+    let vivo = true;
+    leerConsentimientoEscaner().then((ok) => {
+      if (vivo && ok) setPaso("elegir");
+    });
+    return () => {
+      vivo = false;
+    };
+  }, []);
+
+  async function aceptarEnvioIA() {
+    setGuardandoConsent(true);
+    try {
+      await guardarConsentimientoEscaner(true);
+      setPaso("elegir");
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setGuardandoConsent(false);
+    }
+  }
 
   // -------------------------------------------------------------------------
   // Helpers de línea (cierran sobre cfg/modo/catalogo; un solo camino de
@@ -873,6 +915,72 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
   // -------------------------------------------------------------------------
   // Vista: ELEGIR fuente de la foto
   // -------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Vista: CONSENTIMIENTO. Puerta obligatoria antes del primer escaneo.
+  // -------------------------------------------------------------------------
+  //
+  // POR QUE ES UNA PUERTA Y NO UN CARTEL
+  // La politica publicada afirma que el aviso sale antes del primer uso y que
+  // no se manda nada hasta aceptar. Un cartel informativo que se pueda ignorar
+  // convertiria esa frase en mentira. Aqui no hay forma de llegar a la camara
+  // ni a la galeria sin pasar por el boton de aceptar.
+  //
+  // POR QUE EL TEXTO DICE LO QUE DICE
+  // El escaner usa la capa GRATUITA de Gemini, donde Google puede usar el
+  // contenido para mejorar sus modelos, con posible revision humana. Y un
+  // ticket de proveedor no es un dato del usuario: lleva informacion comercial
+  // de un TERCERO (que compra, a quien y a que precio). Omitirlo dejaria un
+  // consentimiento que no informa de lo unico que hay que decidir.
+  // Cuando se pase a la capa de pago, esto se suaviza: se quita el parrafo de
+  // "mejorar sus modelos" y la fecha guardada permite volver a preguntar.
+  const vistaConsentimiento = (
+    <ScrollView contentContainerStyle={est.cuerpo} keyboardShouldPersistTaps="handled">
+      <Banner texto={error} tipo="error" />
+
+      <Text style={est.explica}>
+        El escáner de tickets no lee la foto en tu teléfono: la envía a Google
+        para que su inteligencia artificial la interprete. Antes de usarlo por
+        primera vez conviene que sepas qué implica.
+      </Text>
+
+      <AvisoCaja T={T} tipo="alerta">
+        La foto del ticket se envía a Google (Gemini). En el plan que usamos hoy,
+        Google puede emplear ese contenido para mejorar sus modelos, y eso
+        incluye la posibilidad de que una persona lo revise.
+      </AvisoCaja>
+
+      <AvisoCaja T={T} tipo="info">
+        Un ticket de proveedor no habla solo de ti: dice qué compras, a quién y a
+        qué precio. Si eso es información que prefieres no compartir, no uses el
+        escáner y captura la compra a mano — el resto de YvexPOS funciona igual.
+      </AvisoCaja>
+
+      <Text style={est.explica}>
+        Solo se envía la foto que tú elijas, en el momento en que tocas
+        «Analizar ticket». No se manda nada más de tu negocio, ni se envía nada
+        en segundo plano. Puedes retirar este permiso cuando quieras desde
+        Ajustes.
+      </Text>
+
+      <Boton
+        titulo="Entiendo y acepto usar el escáner"
+        onPress={() => void aceptarEnvioIA()}
+        cargando={guardandoConsent}
+      />
+      <View style={{ height: 10 }} />
+      <Boton titulo="Ahora no" tipo="secundario" onPress={onCerrar} />
+
+      <View style={est.consentEnlaces}>
+        <Pressable onPress={() => void Linking.openURL("https://yvexiq.com/privacidad")} hitSlop={8}>
+          <Text style={est.enlaceTxt}>Aviso de privacidad ›</Text>
+        </Pressable>
+        <Pressable onPress={() => void Linking.openURL("https://yvexiq.com/terminos")} hitSlop={8}>
+          <Text style={est.enlaceTxt}>Términos ›</Text>
+        </Pressable>
+      </View>
+    </ScrollView>
+  );
+
   const vistaElegir = (
     <ScrollView
       contentContainerStyle={est.cuerpo}
@@ -1042,7 +1150,7 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
           </View>
         ) : (
           <View style={est.emparejeOk}>
-            <Insignia texto="PRODUCTO NUEVO" color={T.turquesa} />
+            <Insignia texto="PRODUCTO NUEVO" color={T.acento} />
             <Pressable onPress={() => abrirSelector(i)} hitSlop={8}>
               <Text style={est.cambiarTxt}>emparejar ›</Text>
             </Pressable>
@@ -1518,6 +1626,11 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
       animationType="slide"
       onRequestClose={() => setSelectorIdx(null)}
     >
+      {/* KeyboardAvoidingView: este modal no usa <Hoja>, y con
+          `edgeToEdgeEnabled: true` el `softwareKeyboardLayoutMode: "resize"`
+          de app.json ya no encoge la ventana — el teclado se monta ENCIMA.
+          "padding", nunca "height" (rebota al cerrarse). */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <SafeAreaView style={est.raiz}>
         <CabeceraModal
           titulo="Emparejar línea"
@@ -1571,6 +1684,7 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
           </ScrollView>
         </View>
       </SafeAreaView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 
@@ -1596,6 +1710,11 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
       animationType="slide"
       onRequestClose={() => setDeptoSelectorIdx(null)}
     >
+      {/* KeyboardAvoidingView: este modal no usa <Hoja>, y con
+          `edgeToEdgeEnabled: true` el `softwareKeyboardLayoutMode: "resize"`
+          de app.json ya no encoge la ventana — el teclado se monta ENCIMA.
+          "padding", nunca "height" (rebota al cerrarse). */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <SafeAreaView style={est.raiz}>
         <CabeceraModal
           titulo="Departamento"
@@ -1639,7 +1758,7 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
                   </Text>
                   <View style={est.selectorFilaDer}>
                     {esSugerido && (
-                      <Insignia texto="SUGERIDO" color={T.turquesa} />
+                      <Insignia texto="SUGERIDO" color={T.acento} />
                     )}
                     {activo && <Text style={est.selectorCheck}>✓</Text>}
                   </View>
@@ -1650,6 +1769,7 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
           </ScrollView>
         </View>
       </SafeAreaView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 
@@ -1659,12 +1779,18 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
   const bloqueado = paso === "analizando" || paso === "aplicando";
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
+      {/* KeyboardAvoidingView: este modal no usa <Hoja>, y con
+          `edgeToEdgeEnabled: true` el `softwareKeyboardLayoutMode: "resize"`
+          de app.json ya no encoge la ventana — el teclado se monta ENCIMA.
+          "padding", nunca "height" (rebota al cerrarse). */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <SafeAreaView style={est.raiz}>
         <CabeceraModal
           titulo={TITULOS[paso]}
           izquierda={paso === "listo" ? "Cerrar" : "Cancelar"}
           onIzquierda={bloqueado ? () => {} : onCerrar}
         />
+        {paso === "consentimiento" && vistaConsentimiento}
         {paso === "elegir" && vistaElegir}
         {paso === "previsualizar" && vistaPrevisualizar}
         {paso === "analizando" &&
@@ -1680,6 +1806,7 @@ export default function ModalEscanearTicket({ onCerrar, onAplicado }: Props) {
           <ModalAjustesEscaner onCerrar={() => setAjustesEsc(false)} />
         )}
       </SafeAreaView>
+      </KeyboardAvoidingView>
     </Modal>
   );
 }
@@ -1745,6 +1872,12 @@ const ea = StyleSheet.create({
 // ---------------------------------------------------------------------------
 function crearEstilos(T: Tema) {
   return StyleSheet.create({
+    consentEnlaces: {
+      flexDirection: "row",
+      justifyContent: "center",
+      gap: 22,
+      marginTop: 18,
+    },
     raiz: { flex: 1, backgroundColor: T.fondo },
     cuerpo: { padding: T.esp },
     // --- elegir ---
@@ -1767,9 +1900,9 @@ function crearEstilos(T: Tema) {
     },
     opcionFotoTxt: { color: T.texto, fontSize: 15, fontWeight: "800" },
     enlace: { alignSelf: "center", marginTop: 8, padding: 8 },
-    enlaceTxt: { color: T.turquesa, fontSize: 14, fontWeight: "700" },
+    enlaceTxt: { color: T.acento, fontSize: 14, fontWeight: "700" },
     enlaceMini: {
-      color: T.turquesa,
+      color: T.acento,
       fontSize: 12.5,
       fontWeight: "700",
     },
@@ -1865,7 +1998,7 @@ function crearEstilos(T: Tema) {
       marginTop: 10,
     },
     emparejeOkTxt: { color: T.exito, fontSize: 12.5, fontWeight: "800" },
-    cambiarTxt: { color: T.turquesa, fontSize: 12.5, fontWeight: "700" },
+    cambiarTxt: { color: T.acento, fontSize: 12.5, fontWeight: "700" },
     bloque: { marginTop: 12 },
     deptoFilaTxt: { color: T.textoSuave, fontSize: 13, fontWeight: "700" },
     deptoFilaValor: { color: T.texto, fontWeight: "800" },
@@ -2023,13 +2156,13 @@ function crearEstilos(T: Tema) {
     },
     selectorNuevo: {
       borderWidth: 1.5,
-      borderColor: T.turquesa,
+      borderColor: T.acento,
       borderRadius: T.radioChico,
       paddingVertical: 12,
       alignItems: "center",
       marginBottom: 8,
     },
-    selectorNuevoTxt: { color: T.turquesa, fontSize: 14, fontWeight: "800" },
+    selectorNuevoTxt: { color: T.acento, fontSize: 14, fontWeight: "800" },
     selectorFila: {
       flexDirection: "row",
       alignItems: "center",

@@ -1,8 +1,8 @@
 {
   "expo": {
-    "name": "yvexpos-movil",
+    "name": "YvexPOS",
     "slug": "yvexpos-movil",
-    "version": "1.0.0",
+    "version": "1.1.1",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "yvexposmovil",
@@ -12,12 +12,22 @@
       "supportsTablet": true
     },
     "android": {
+      "package": "com.yvexiq.pos",
       "adaptiveIcon": {
         "backgroundColor": "#F4EDE1",
         "foregroundImage": "./assets/images/android-icon-foreground.png"
       },
       "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
+      "softwareKeyboardLayoutMode": "resize",
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO"
+      ],
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO",
+        "android.permission.MODIFY_AUDIO_SETTINGS"
+      ]
     },
     "web": {
       "output": "static",
@@ -41,14 +51,38 @@
       [
         "expo-camera",
         {
-          "cameraPermission": "YvexPOS usa la cámara para escanear códigos de barras y tickets de compra."
+          "cameraPermission": "YvexPOS usa la cámara para escanear códigos de barras y tickets de compra.",
+          "recordAudioAndroidPermission": false,
+          "microphonePermission": false
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "compileSdkVersion": 36,
+            "targetSdkVersion": 36,
+            "buildToolsVersion": "36.0.0"
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "dbd51a83-0c6d-4d05-8526-264066d42899"
+      }
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/dbd51a83-0c6d-4d05-8526-264066d42899"
     }
   }
 }

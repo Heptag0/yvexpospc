@@ -45,6 +45,12 @@ import {
   ScrollView,
   StyleSheet,
 } from "react-native";
+// Ver ui.tsx: el KeyboardAvoidingView de React Native encoge el contenedor
+// pero no desplaza hasta el campo enfocado. Aquí el buscador está arriba y la
+// lista debajo, así que lo único que hace falta es que la lista se encoja de
+// verdad — pero el de la librería además funciona con `edgeToEdgeEnabled`,
+// donde la ventana ya no se redimensiona sola.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect } from "expo-router";
 import {
@@ -56,7 +62,14 @@ import {
   listarCategorias,
   metricasInventario,
 } from "@/src/base/inventario";
-import { sembrarSiVacio } from "@/src/base/semilla";
+// PENDIENTES.md punto 24 — antes: import { sembrarSiVacio } from
+// "@/src/base/semilla"; se llamaba en cargar() cada vez que se abría esta
+// pantalla (vía useFocusEffect, más abajo). El comentario del propio
+// semilla.ts ya avisaba "cuando la app esté lista, esto se quita" — nunca
+// se le puso una bandera, así que CUALQUIER negocio real que se quedara
+// con la tabla de productos vacía por cualquier motivo recibía en
+// silencio 3 categorías y 8 productos falsos, cigarros de marca
+// incluidos, sin ningún aviso ni forma de saber por qué aparecieron.
 import { pesos, fmtStock } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import {
@@ -71,6 +84,7 @@ import {
   useEstiloInput,
 } from "@/src/componentes/ui";
 import ImagenProducto from "@/src/componentes/ImagenProducto";
+import BotonYaxo from "@/src/componentes/BotonYaxo";
 import { IconoUI, IdUI } from "@/src/componentes/iconos";
 import SelectorVista, { Vista, columnasDe } from "@/src/componentes/SelectorVista";
 import FormularioProducto from "@/src/componentes/FormularioProducto";
@@ -83,12 +97,25 @@ import ModalProveedores from "@/src/componentes/ModalProveedores";
 
 // Acciones secundarias: icono confirmado contra el mismo catálogo que ya usa
 // el resto de la app (ver src/base/herramientas.ts), nunca un id inventado.
+// ETIQUETAS DE UNA SOLA PALABRA, A PROPOSITO
+// ---------------------------------------------------------------------------
+// Son cinco columnas a `flex: 1`: en un telefono normal cada una mide poco mas
+// de 60 px. "Departamentos" y "Proveedores" no caben en ese ancho, y React
+// Native no divide con guion: parte por donde toque. Salia "Departame /
+// ntos" y "Proveedore / s", que es justo el detalle que delata una plantilla.
+//
+// Se arregla en el TEXTO, no en el layout: cinco etiquetas de una palabra que
+// caben enteras. Estrechar el icono o bajar el tamano de letra solo mueve el
+// problema al siguiente telefono mas angosto.
+//
+// Regla al anadir una accion aqui: una sola palabra, y de las cortas. Si hace
+// falta explicarla, el sitio es la pantalla que abre, no esta rejilla.
 const ACCIONES: { id: string; icono: IdUI; label: string }[] = [
   { id: "reporte", icono: "reportes", label: "Reporte" },
-  { id: "conteo", icono: "inventario", label: "Conteo físico" },
-  { id: "deptos", icono: "etiqueta", label: "Departamentos" },
-  { id: "escanear", icono: "escaner", label: "Escanear ticket" },
-  { id: "proveedores", icono: "camion", label: "Proveedores" },
+  { id: "conteo", icono: "inventario", label: "Conteo" },
+  { id: "deptos", icono: "etiqueta", label: "Deptos." },
+  { id: "escanear", icono: "escaner", label: "Escanear" },
+  { id: "proveedores", icono: "camion", label: "Proveedor" },
 ];
 
 export default function InventarioScreen() {
@@ -134,7 +161,6 @@ export default function InventarioScreen() {
   const [proveedoresAbierto, setProveedoresAbierto] = useState(false);
 
   const cargar = useCallback(async () => {
-    await sembrarSiVacio();
     const [prods, cats, mets] = await Promise.all([
       listarProductos({
         filtro: busquedaConsulta,
@@ -279,43 +305,124 @@ export default function InventarioScreen() {
   //   · Cada fila en vista de lista, al envolverla en el renderItem.
   //   · Cada fila en vista de cuadrícula, vía columnWrapperStyle.
   // Ningún nivel intermedio vuelve a aportar margen por su cuenta.
-  function Cabecera() {
+  // NO ES UN COMPONENTE, Y ESO ES A PROPÓSITO — EL TECLADO SE CERRABA
+  // ------------------------------------------------------------------------
+  // Antes esto era `function Cabecera()` y se pasaba como
+  // `ListHeaderComponent={Cabecera}`. Al escribir en el buscador, cada letra
+  // cambiaba el estado, InventarioScreen se volvía a renderizar, y JavaScript
+  // creaba una función `Cabecera` NUEVA — idéntica en código, distinta en
+  // identidad. React lo lee como "otro componente", no como el mismo
+  // actualizado: desmonta el subárbol entero y monta uno nuevo. El TextInput
+  // que tenía el foco dejaba de existir y Android cerraba el teclado. Había
+  // que tocar el campo de nuevo por cada letra.
+  //
+  // Llamándola como función normal (`cabecera()` abajo), el JSX queda
+  // inlineado en el render del padre: los tipos que React compara pasan a ser
+  // View / TextInput / ScrollView, que son estables. No hay remontaje y el
+  // foco sobrevive.
+  //
+  // Regla para no repetirlo: ningún componente definido dentro de otro
+  // componente puede contener un TextInput. O se saca a nivel de módulo, o se
+  // llama como función. Esto NO tiene que ver con KeyboardAvoidingView ni con
+  // softwareKeyboardLayoutMode — ver el comentario del render, que resuelve
+  // otro problema distinto (que el teclado tapaba las filas).
+  function cabecera() {
     return (
           <View style={{ paddingHorizontal: T.esp }}>
-            <Encabezado titulo="Inventario" />
+            <Encabezado
+              titulo="Inventario"
+              acciones={
+                /* Dos acciones en la misma fila. Yaxo va a la IZQUIERDA y
+                   "Nuevo producto" se queda pegado al borde: el botón de
+                   acento es el que se toca a diario y no puede moverse de
+                   sitio, mientras que Yaxo ocupa la misma posición relativa
+                   (primera de la fila de acciones) que en Inicio. Así el
+                   acceso al asistente es el mismo gesto en las dos pantallas
+                   sin desplazar lo que ya estaba.
+
+                   `desde="inventario"` hace que Yaxo abra ordenando primero
+                   "¿qué debo resurtir?", "¿qué tengo parado?" y "¿estoy
+                   cobrando bien?" — sin ocultar el resto. */
+                <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm }}>
+                  <BotonYaxo desde="inventario" />
+                  {/* "Nuevo producto" vive AQUÍ, no en un botón flotante.
+                     Un flotante siempre tapa contenido mientras se desplaza la
+                     lista — el relleno inferior evita que oculte el último
+                     producto, pero no que se cruce por delante de los demás.
+                     En la cabecera está igual de a mano, no tapa nada, y sigue
+                     la misma regla que el resto de la app: nada flota encima
+                     del contenido. */}
+                  <Pressable
+                    onPress={() => {
+                      setProductoEditar(null);
+                      setFormAbierto(true);
+                    }}
+                    accessibilityRole="button"
+                    accessibilityLabel="Crear producto"
+                    hitSlop={8}
+                    style={({ pressed }) => ({
+                      width: 44,
+                      height: 44,
+                      borderRadius: T.radio,
+                      alignItems: "center",
+                      justifyContent: "center",
+                      backgroundColor: pressed ? T.acento : T.acentoRelleno,
+                    })}
+                  >
+                    <IconoUI id="mas" size={22} color={T.acentoTexto} grosor={2.2} />
+                  </Pressable>
+                </View>
+              }
+            />
     
-            {/* Acciones: scroller horizontal — nunca se rompe, sin importar
-                cuántas entradas tenga. */}
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={{ gap: T.esps.sm, paddingBottom: T.esps.lg }}
+            {/* Acciones: fila FIJA de cinco, todas visibles.
+                Antes era un scroller horizontal. Resolvía el problema
+                anterior (cinco píldoras anchas se envolvían en dos filas
+                desiguales) pero creaba otro: siempre había una entrada
+                cortada por el borde derecho, y una lista que se corta a
+                mitad de palabra es el patrón más reconocible de "plantilla".
+                Además nada indicaba que se pudiera deslizar, así que
+                "Proveedores" era invisible en la práctica.
+                Con el icono arriba y la etiqueta debajo, las cinco caben en
+                el ancho de cualquier teléfono: se ven todas, no se corta
+                ninguna y no hay que descubrir un gesto. */}
+            <View
+              style={{
+                flexDirection: "row",
+                paddingBottom: T.esps.lg,
+              }}
             >
               {ACCIONES.map((a) => (
                 <Pressable
                   key={a.id}
                   onPress={() => accionar(a.id)}
-                  android_ripple={{ color: T.acentoBorde }}
+                  android_ripple={{ color: T.acentoBorde, borderless: false }}
                   style={({ pressed }) => [
                     {
-                      flexDirection: "row",
+                      flex: 1,
                       alignItems: "center",
-                      gap: T.esps.sm,
-                      minHeight: 44,
-                      paddingHorizontal: T.esps.lg,
-                      borderRadius: T.radioPildora,
-                      backgroundColor: T.superficie2,
+                      justifyContent: "flex-start",
+                      gap: 6,
+                      paddingVertical: T.esps.md,
+                      paddingHorizontal: 2,
+                      borderRadius: T.radio,
+                      backgroundColor: pressed ? T.superficie3 : "transparent",
                     },
-                    pressed && { backgroundColor: T.superficie3 },
                   ]}
                 >
-                  <IconoUI id={a.icono} size={16} color={T.textoSuave} />
-                  <Txt escala="pie" tono="suave" fuerte>
+                  <IconoUI id={a.icono} size={20} color={T.textoSuave} />
+                  <Txt
+                    escala="micro"
+                    tono="suave"
+                    fuerte
+                    lineas={2}
+                    estilo={{ textAlign: "center" }}
+                  >
                     {a.label}
                   </Txt>
                 </Pressable>
               ))}
-            </ScrollView>
+            </View>
     
             {/* Valor del inventario — la única protagonista de la pantalla:
                 es la pregunta que un dueño se hace de verdad ("¿cuánto dinero
@@ -540,7 +647,22 @@ export default function InventarioScreen() {
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }} edges={["top"]}>
+        {/* EL TECLADO TAPABA EL BUSCADOR Y LAS FILAS DE ABAJO
+            ------------------------------------------------------------------
+            Esta pantalla NO usa <Pantalla>: monta SafeAreaView > FlatList
+            directamente (ver el comentario de la cabecera), así que no
+            heredaba nada del manejo de teclado. Y app.json no basta:
+            `softwareKeyboardLayoutMode: "resize"` deja de redimensionar la
+            ventana cuando `edgeToEdgeEnabled` está activo — la app dibuja por
+            debajo del teclado en vez de encogerse.
 
+            "padding" y no "height", igual que en <Hoja>: "height" anima la
+            altura del contenedor y rebota al cerrarse el teclado.
+
+            Envuelve SOLO la lista, no los modales: cada modal trae su propio
+            <Hoja>, que ya resuelve lo suyo. Anidar dos capas que empujan el
+            contenido las haría sumarse. */}
+        <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
         {/* El FlatList es la ÚNICA superficie con scroll de la pantalla: la
             cabecera entra como ListHeaderComponent, así no hay ningún
             reparto de flex entre hermanos que pueda salir mal. */}
@@ -564,13 +686,19 @@ export default function InventarioScreen() {
             // se suma con el de cada fila, y algo queda con el doble.
             contentContainerStyle={{
               paddingHorizontal: 0,
-              paddingBottom: 96,
+              // Antes 96, para que el botón flotante no tapara el último
+              // producto. Ese botón ya no existe (se movió a la cabecera),
+              // así que solo hace falta aire para no pegar la lista al borde.
+              paddingBottom: T.esps.xxl,
               gap: T.esps.sm,
             }}
             refreshControl={
               <RefreshControl refreshing={refrescando} onRefresh={onRefresh} tintColor={T.acento} />
             }
-            ListHeaderComponent={Cabecera}
+            // `cabecera()` con paréntesis: se pasa el ELEMENTO ya construido,
+            // no el tipo de componente. Ver el comentario de `cabecera` arriba
+            // — es lo que impide que el teclado se cierre en cada letra.
+            ListHeaderComponent={cabecera()}
             ListEmptyComponent={
               <View style={{ paddingHorizontal: T.esp }}>
                 <Vacio
@@ -615,37 +743,9 @@ export default function InventarioScreen() {
             )}
           />
         )}
+        </KeyboardAvoidingView>
 
       {/* FAB crear */}
-      <Pressable
-        onPress={() => {
-          setProductoEditar(null);
-          setFormAbierto(true);
-        }}
-        accessibilityRole="button"
-        accessibilityLabel="Crear producto"
-        style={({ pressed }) => ({
-          position: "absolute",
-          right: T.esp,
-          bottom: T.esp,
-          width: 56,
-          height: 56,
-          borderRadius: 28,
-          backgroundColor: T.acentoRelleno,
-          alignItems: "center",
-          justifyContent: "center",
-          opacity: pressed ? 0.9 : 1,
-          shadowColor: T.acento,
-          shadowOpacity: 0.35,
-          shadowRadius: 14,
-          shadowOffset: { width: 0, height: 6 },
-          elevation: 6,
-        })}
-      >
-        <Txt escala="titulo" estilo={{ color: T.acentoTexto, marginTop: -2 }}>
-          +
-        </Txt>
-      </Pressable>
 
       {/* Modales (montaje condicional = estado fresco) */}
       {formAbierto && (

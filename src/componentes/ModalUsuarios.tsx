@@ -7,22 +7,35 @@
 // Pensado para el caso real de una tablet compartida: cada empleado entra con
 // su PIN y sus ventas quedan a su nombre. Si el negocio es de una persona,
 // esto no estorba: hay un usuario, se selecciona solo, y no se pide PIN.
+//
+// ---------------------------------------------------------------------------
+// MIGRADO AL SISTEMA DE DISEÑO
+// ---------------------------------------------------------------------------
+// Es la pantalla que MÁS se ve de todas las que quedaban sin migrar: aparece
+// en el onboarding y en cada cambio de turno. Y era la que más se desviaba:
+// 60 líneas de StyleSheet propio, `fontWeight: "800"` por todas partes,
+// tamaños a mano (17, 15, 13.5, 12.5, 12), bordes de 1px en cada tarjeta, un
+// estilo de input local (`inp`) que ignoraba `useEstiloInput`, y checks y
+// cruces escritos como caracteres de texto ("✓", "✕") en vez de iconos.
+//
+// Ahora:
+//   · <Hoja tipo="completa"> en vez de Modal + SafeAreaView + CabeceraModal
+//     montados a mano. De paso hereda su KeyboardAvoidingView, que aquí era
+//     iOS-only y en Android dejaba el campo del PIN debajo del teclado.
+//   · <Grupo> + <Fila> para la lista, igual que Inventario y Herramientas.
+//   · <Campo> + useEstiloInput para el formulario.
+//   · IconoUI en vez de "✓" y "✕".
+//   · Alert.alert nativo sustituido por una <Hoja> chica de confirmación,
+//     que es el patrón que ya usa ModalProveedores para eliminar. El Alert
+//     del sistema es la única pieza de interfaz de toda la app que no se
+//     puede tematizar: aparecía en gris de Android sobre el tema Papel.
+//
+// El avatar con la inicial se queda, pero pasa a cuadrado redondeado con
+// acentoSuave: el mismo tratamiento que los iconos de "Tus accesos" en Inicio
+// y las filas del panel de Herramientas.
 
 import { useCallback, useEffect, useState } from "react";
-import {
-  Modal,
-  View,
-  Text,
-  TextInput,
-  ScrollView,
-  Pressable,
-  StyleSheet,
-  Switch,
-  Alert,
-  KeyboardAvoidingView,
-  Platform,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { View, TextInput, Pressable, Switch } from "react-native";
 import {
   UsuarioPOS,
   Rol,
@@ -38,7 +51,17 @@ import {
   setPedirPin,
 } from "@/src/base/usuarios";
 import { useTema } from "@/src/componentes/TemaProvider";
-import { Boton, Banner, CabeceraModal } from "@/src/componentes/ui";
+import { IconoUI } from "@/src/componentes/iconos";
+import {
+  Boton,
+  Banner,
+  Campo,
+  Hoja,
+  Grupo,
+  Fila,
+  Txt,
+  useEstiloInput,
+} from "@/src/componentes/ui";
 
 type Vista = "lista" | "pin" | "form";
 
@@ -52,6 +75,8 @@ export default function ModalUsuarios({
   onCambio: () => void;
 }) {
   const { tema: T } = useTema();
+  const estiloInput = useEstiloInput();
+
   const [vista, setVista] = useState<Vista>("lista");
   const [usuarios, setUsuarios] = useState<UsuarioPOS[]>([]);
   const [activoId, setActivoId] = useState<string | null>(null);
@@ -67,6 +92,7 @@ export default function ModalUsuarios({
   const [pinNuevo, setPinNuevo] = useState("");
   const [rol, setRol] = useState<Rol>("cajero");
 
+  const [borrando, setBorrando] = useState<UsuarioPOS | null>(null);
   const [error, setError] = useState("");
   const [guardando, setGuardando] = useState(false);
 
@@ -157,331 +183,284 @@ export default function ModalUsuarios({
     }
   }
 
-  function confirmarBorrado(u: UsuarioPOS) {
-    Alert.alert(
-      "Eliminar usuario",
-      `¿Eliminar a "${u.nombre}"? Sus ventas anteriores se conservan.`,
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Eliminar",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              await eliminarUsuario(u.id);
-              await cargar();
-              onCambio();
-            } catch (e: any) {
-              setError(e?.message ?? String(e));
-            }
-          },
-        },
-      ]
-    );
+  async function confirmarEliminar() {
+    if (!borrando) return;
+    try {
+      await eliminarUsuario(borrando.id);
+      await cargar();
+      onCambio();
+    } catch (e: any) {
+      setError(e?.message ?? String(e));
+    } finally {
+      setBorrando(null);
+    }
   }
 
-  const inp = {
-    backgroundColor: T.superficie2,
-    borderRadius: T.radioChico,
-    paddingHorizontal: 14,
-    paddingVertical: 13,
-    fontSize: 16,
-    color: T.texto,
-    borderWidth: 1,
-    borderColor: T.borde,
-  };
+  const titulo =
+    vista === "pin"
+      ? candidato?.nombre ?? "PIN"
+      : vista === "form"
+      ? editando
+        ? "Editar usuario"
+        : "Nuevo usuario"
+      : modo === "cambiar"
+      ? "¿Quién vende?"
+      : "Usuarios";
+
+  /** Atrás dentro del modal: de una sub-vista se vuelve a la lista, y solo
+   *  desde la lista se cierra. Antes esto vivía en la CabeceraModal a mano. */
+  function cerrarOVolver() {
+    if (vista === "lista") {
+      onCerrar();
+    } else {
+      setVista("lista");
+      setError("");
+    }
+  }
 
   return (
-    <Modal visible animationType="slide" onRequestClose={onCerrar}>
-      <SafeAreaView style={[e.raiz, { backgroundColor: T.fondo }]}>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
-          <CabeceraModal
-            titulo={
-              vista === "pin"
-                ? candidato?.nombre ?? "PIN"
-                : vista === "form"
-                ? editando
-                  ? "Editar usuario"
-                  : "Nuevo usuario"
-                : modo === "cambiar"
-                ? "¿Quién vende?"
-                : "Usuarios"
-            }
-            izquierda={vista === "lista" ? "Cerrar" : "← Atrás"}
-            onIzquierda={() => {
-              if (vista === "lista") onCerrar();
-              else {
-                setVista("lista");
-                setError("");
-              }
-            }}
-            derecha={vista === "lista" && modo === "gestionar" ? "+ Nuevo" : undefined}
-            onDerecha={vista === "lista" && modo === "gestionar" ? nuevoForm : undefined}
-          />
+    <Hoja visible onCerrar={cerrarOVolver} titulo={titulo} tipo="completa">
+      <Banner texto={error} tipo="error" />
 
-          <ScrollView
-            contentContainerStyle={{ padding: T.esp, paddingBottom: 50 }}
-            keyboardShouldPersistTaps="handled"
-          >
-            <Banner texto={error} tipo="error" />
+      {/* ------------------------------ LISTA ------------------------------ */}
+      {vista === "lista" && (
+        <>
+          {modo === "cambiar" && (
+            <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.lg }}>
+              Cada venta queda registrada a nombre de quien la hace.
+            </Txt>
+          )}
 
-            {/* ---------------- LISTA ---------------- */}
-            {vista === "lista" && (
-              <>
-                {modo === "cambiar" && (
-                  <Text style={[e.ayuda, { color: T.textoSuave }]}>
-                    Cada venta queda registrada a nombre de quien la hace.
-                  </Text>
-                )}
-
-                {usuarios.map((u) => {
-                  const esActivo = u.id === activoId;
-                  return (
-                    <Pressable
-                      key={u.id}
-                      onPress={() => (modo === "cambiar" ? elegir(u) : editarForm(u))}
-                      style={({ pressed }) => [
-                        e.fila,
-                        {
-                          backgroundColor: esActivo ? T.acentoSuave : T.superficie,
-                          borderColor: esActivo ? T.acento : T.borde,
-                        },
-                        pressed && { backgroundColor: T.superficie3 },
-                      ]}
-                    >
-                      <View
-                        style={[
-                          e.avatar,
-                          { backgroundColor: T.acento + "22", borderColor: T.acento + "55" },
-                        ]}
-                      >
-                        <Text style={[e.avatarTxt, { color: T.acento }]}>
-                          {u.nombre.trim()[0]?.toUpperCase() ?? "?"}
-                        </Text>
-                      </View>
-                      <View style={{ flex: 1 }}>
-                        <Text style={[e.nombre, { color: T.texto }]}>{u.nombre}</Text>
-                        <Text style={[e.rol, { color: T.textoTenue }]}>
-                          {ROLES.find((r) => r.id === u.rol)?.nombre ?? u.rol}
-                          {esActivo ? "  ·  activo ahora" : ""}
-                        </Text>
-                      </View>
-                      {modo === "gestionar" && usuarios.length > 1 && (
-                        <Pressable onPress={() => confirmarBorrado(u)} hitSlop={10}>
-                          <Text style={{ color: T.peligro, fontSize: 16, fontWeight: "800" }}>
-                            ✕
-                          </Text>
-                        </Pressable>
-                      )}
-                      {modo === "cambiar" && esActivo && (
-                        <Text style={{ color: T.acento, fontSize: 15, fontWeight: "800" }}>✓</Text>
-                      )}
-                    </Pressable>
-                  );
-                })}
-
-                {modo === "gestionar" && (
-                  <>
+          <Grupo>
+            {usuarios.map((u) => {
+              const esActivo = u.id === activoId;
+              return (
+                <Fila
+                  key={u.id}
+                  titulo={u.nombre}
+                  meta={
+                    (ROLES.find((r) => r.id === u.rol)?.nombre ?? u.rol) +
+                    (esActivo ? " · vendiendo ahora" : "")
+                  }
+                  destacado={esActivo}
+                  flecha={modo === "gestionar"}
+                  onPress={() => (modo === "cambiar" ? elegir(u) : editarForm(u))}
+                  icono={
                     <View
-                      style={[
-                        e.switchFila,
-                        { backgroundColor: T.superficie, borderColor: T.borde },
-                      ]}
+                      style={{
+                        width: 36,
+                        height: 36,
+                        borderRadius: T.radioChico,
+                        backgroundColor: T.acentoSuave,
+                        alignItems: "center",
+                        justifyContent: "center",
+                      }}
                     >
-                      <View style={{ flex: 1 }}>
-                        <Text style={[e.nombre, { color: T.texto }]}>Pedir PIN al cambiar</Text>
-                        <Text style={[e.rol, { color: T.textoTenue }]}>
-                          Apágalo si eres la única persona que usa el POS.
-                        </Text>
-                      </View>
-                      <Switch
-                        value={conPin}
-                        onValueChange={async (v) => {
-                          setConPin(v);
-                          await setPedirPin(v);
-                        }}
-                        trackColor={{ true: T.acento, false: T.borde }}
-                        thumbColor="#fff"
-                      />
+                      <Txt escala="cuerpo" tono="acento" fuerte>
+                        {u.nombre.trim()[0]?.toUpperCase() ?? "?"}
+                      </Txt>
                     </View>
-
-                    <Text style={[e.nota, { color: T.textoTenue }]}>
-                      El PIN por defecto del primer usuario es 0000. Cámbialo si
-                      varias personas usan este dispositivo.
-                    </Text>
-                  </>
-                )}
-              </>
-            )}
-
-            {/* ---------------- PIN ---------------- */}
-            {vista === "pin" && candidato && (
-              <>
-                <Text style={[e.ayuda, { color: T.textoSuave, textAlign: "center" }]}>
-                  Escribe el PIN de {candidato.nombre}
-                </Text>
-                <TextInput
-                  style={[
-                    inp,
-                    {
-                      fontSize: 32,
-                      textAlign: "center",
-                      letterSpacing: 14,
-                      paddingVertical: 18,
-                      fontWeight: "800",
-                    },
-                  ]}
-                  value={pin}
-                  onChangeText={(t) => {
-                    setPin(t.replace(/\D/g, "").slice(0, 4));
-                    setError("");
-                  }}
-                  keyboardType="number-pad"
-                  secureTextEntry
-                  maxLength={4}
-                  autoFocus
-                  onSubmitEditing={confirmarPin}
-                />
-                <View style={{ marginTop: 18 }}>
-                  <Boton
-                    titulo="Entrar"
-                    onPress={confirmarPin}
-                    cargando={guardando}
-                    deshabilitado={pin.length < 4}
-                  />
-                </View>
-              </>
-            )}
-
-            {/* ---------------- FORMULARIO ---------------- */}
-            {vista === "form" && (
-              <>
-                <Etiqueta T={T}>Nombre</Etiqueta>
-                <TextInput
-                  style={inp}
-                  value={nombre}
-                  onChangeText={setNombre}
-                  placeholder="Ej. Lupita"
-                  placeholderTextColor={T.textoTenue}
-                />
-
-                <Etiqueta T={T}>
-                  {editando ? "PIN nuevo · déjalo vacío para no cambiarlo" : "PIN de 4 dígitos"}
-                </Etiqueta>
-                <TextInput
-                  style={[inp, { textAlign: "center", letterSpacing: 10, fontWeight: "800" }]}
-                  value={pinNuevo}
-                  onChangeText={(t) => setPinNuevo(t.replace(/\D/g, "").slice(0, 4))}
-                  keyboardType="number-pad"
-                  secureTextEntry
-                  maxLength={4}
-                  placeholder="0000"
-                  placeholderTextColor={T.textoTenue}
-                />
-
-                <Etiqueta T={T}>Rol</Etiqueta>
-                <View style={{ gap: 8 }}>
-                  {ROLES.map((r) => {
-                    const activo = rol === r.id;
-                    return (
+                  }
+                  valor={
+                    modo === "gestionar" && usuarios.length > 1 ? (
                       <Pressable
-                        key={r.id}
-                        onPress={() => setRol(r.id)}
-                        style={[
-                          e.rolCaja,
-                          {
-                            backgroundColor: activo ? T.acentoSuave : T.superficie,
-                            borderColor: activo ? T.acento : T.borde,
-                          },
-                        ]}
+                        onPress={() => setBorrando(u)}
+                        hitSlop={12}
+                        accessibilityRole="button"
+                        accessibilityLabel={`Eliminar a ${u.nombre}`}
+                        style={{ padding: T.esps.xs }}
                       >
-                        <View style={{ flex: 1 }}>
-                          <Text style={[e.nombre, { color: T.texto }]}>{r.nombre}</Text>
-                          <Text style={[e.rol, { color: T.textoTenue }]}>{r.desc}</Text>
-                        </View>
-                        {activo && (
-                          <Text style={{ color: T.acento, fontSize: 15, fontWeight: "800" }}>✓</Text>
-                        )}
+                        <IconoUI id="basura" size={17} color={T.textoTenue} />
                       </Pressable>
-                    );
-                  })}
-                </View>
+                    ) : esActivo && modo === "cambiar" ? (
+                      <IconoUI id="persona" size={17} color={T.acento} />
+                    ) : undefined
+                  }
+                />
+              );
+            })}
+          </Grupo>
 
-                <View style={{ marginTop: 20 }}>
-                  <Boton
-                    titulo={editando ? "Guardar cambios" : "Crear usuario"}
-                    onPress={guardar}
-                    cargando={guardando}
-                  />
-                </View>
-              </>
-            )}
-          </ScrollView>
-        </KeyboardAvoidingView>
-      </SafeAreaView>
-    </Modal>
+          {modo === "gestionar" && (
+            <>
+              <View style={{ marginTop: T.esps.lg }}>
+                <Boton titulo="Nuevo usuario" tipo="secundario" onPress={nuevoForm} />
+              </View>
+
+              <View style={{ marginTop: T.esps.xl }}>
+                <Grupo>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      alignItems: "center",
+                      gap: T.esps.md,
+                      minHeight: T.filaAlto,
+                      paddingHorizontal: T.esps.lg,
+                      paddingVertical: T.esps.md,
+                    }}
+                  >
+                    <View style={{ flex: 1 }}>
+                      <Txt escala="cuerpo" fuerte>
+                        Pedir PIN al cambiar
+                      </Txt>
+                      <Txt escala="pie" tono="tenue" estilo={{ marginTop: 2 }}>
+                        Apágalo si eres la única persona que usa el POS.
+                      </Txt>
+                    </View>
+                    <Switch
+                      value={conPin}
+                      onValueChange={async (v) => {
+                        setConPin(v);
+                        await setPedirPin(v);
+                      }}
+                      trackColor={{ false: T.superficie3, true: T.acentoRelleno }}
+                      thumbColor={T.superficie}
+                      accessibilityLabel="Pedir PIN al cambiar de usuario"
+                    />
+                  </View>
+                </Grupo>
+              </View>
+
+              <Txt escala="pie" tono="tenue" estilo={{ marginTop: T.esps.lg }}>
+                El PIN por defecto del primer usuario es 0000. Cámbialo si varias
+                personas usan este dispositivo.
+              </Txt>
+            </>
+          )}
+        </>
+      )}
+
+      {/* ------------------------------- PIN ------------------------------- */}
+      {vista === "pin" && candidato && (
+        <>
+          <Txt
+            escala="pie"
+            tono="suave"
+            estilo={{ textAlign: "center", marginBottom: T.esps.lg }}
+          >
+            Escribe el PIN de {candidato.nombre}
+          </Txt>
+          <TextInput
+            style={[
+              estiloInput,
+              {
+                fontSize: 30,
+                textAlign: "center",
+                letterSpacing: 14,
+                paddingVertical: 18,
+              },
+            ]}
+            value={pin}
+            onChangeText={(t) => {
+              setPin(t.replace(/\D/g, "").slice(0, 4));
+              setError("");
+            }}
+            keyboardType="number-pad"
+            secureTextEntry
+            maxLength={4}
+            autoFocus
+            onSubmitEditing={confirmarPin}
+          />
+          <View style={{ marginTop: T.esps.xl }}>
+            <Boton
+              titulo="Entrar"
+              onPress={confirmarPin}
+              cargando={guardando}
+              deshabilitado={pin.length < 4}
+            />
+          </View>
+        </>
+      )}
+
+      {/* --------------------------- FORMULARIO --------------------------- */}
+      {vista === "form" && (
+        <>
+          <Campo label="Nombre">
+            <TextInput
+              style={estiloInput}
+              value={nombre}
+              onChangeText={setNombre}
+              placeholder="Ej. Lupita"
+              placeholderTextColor={T.textoTenue}
+              autoCapitalize="words"
+            />
+          </Campo>
+
+          <Campo
+            label={editando ? "PIN nuevo" : "PIN de 4 dígitos"}
+            ayuda={editando ? "Déjalo vacío para no cambiarlo." : undefined}
+          >
+            <TextInput
+              style={[estiloInput, { textAlign: "center", letterSpacing: 10 }]}
+              value={pinNuevo}
+              onChangeText={(t) => setPinNuevo(t.replace(/\D/g, "").slice(0, 4))}
+              keyboardType="number-pad"
+              secureTextEntry
+              maxLength={4}
+              placeholder="0000"
+              placeholderTextColor={T.textoTenue}
+            />
+          </Campo>
+
+          <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.sm }}>
+            Rol
+          </Txt>
+          <Grupo>
+            {ROLES.map((r) => {
+              const activo = rol === r.id;
+              return (
+                <Fila
+                  key={r.id}
+                  titulo={r.nombre}
+                  meta={r.desc}
+                  destacado={activo}
+                  flecha={false}
+                  onPress={() => setRol(r.id)}
+                  valor={
+                    activo ? <IconoUI id="persona" size={16} color={T.acento} /> : undefined
+                  }
+                />
+              );
+            })}
+          </Grupo>
+
+          <View style={{ marginTop: T.esps.xl }}>
+            <Boton
+              titulo={editando ? "Guardar cambios" : "Crear usuario"}
+              onPress={guardar}
+              cargando={guardando}
+            />
+          </View>
+        </>
+      )}
+
+      <View style={{ height: T.esps.xxl }} />
+
+      {/* Confirmación de borrado: hoja chica, no Alert nativo.
+          El Alert del sistema es la única pieza de interfaz de la app que no
+          se puede tematizar — salía en gris de Android encima del tema Papel.
+          Mismo patrón que ya usa ModalProveedores. */}
+      <Hoja
+        visible={borrando !== null}
+        onCerrar={() => setBorrando(null)}
+        titulo="Eliminar usuario"
+        pie={
+          <View style={{ gap: T.esps.sm }}>
+            <Boton titulo="Eliminar" tipo="peligro" onPress={confirmarEliminar} />
+            <Boton
+              titulo="Cancelar"
+              tipo="secundario"
+              onPress={() => setBorrando(null)}
+            />
+          </View>
+        }
+      >
+        <Txt escala="pie" tono="suave">
+          {borrando
+            ? `¿Eliminar a "${borrando.nombre}"? Sus ventas anteriores se conservan a su nombre.`
+            : ""}
+        </Txt>
+      </Hoja>
+    </Hoja>
   );
 }
-
-function Etiqueta({ children, T }: { children: string; T: any }) {
-  return (
-    <Text
-      style={{
-        color: T.textoSuave,
-        fontSize: 12,
-        fontWeight: "800",
-        letterSpacing: 0.6,
-        textTransform: "uppercase",
-        marginBottom: 7,
-        marginTop: 16,
-      }}
-    >
-      {children}
-    </Text>
-  );
-}
-
-const e = StyleSheet.create({
-  raiz: { flex: 1 },
-  ayuda: { fontSize: 13.5, lineHeight: 20, marginBottom: 14 },
-  nota: { fontSize: 12.5, lineHeight: 19, marginTop: 14 },
-  fila: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 13,
-    borderRadius: 14,
-    borderWidth: 1,
-    padding: 14,
-    marginBottom: 8,
-  },
-  avatar: {
-    width: 42,
-    height: 42,
-    borderRadius: 12,
-    borderWidth: 1,
-    alignItems: "center",
-    justifyContent: "center",
-  },
-  avatarTxt: { fontSize: 17, fontWeight: "800" },
-  nombre: { fontSize: 15, fontWeight: "800" },
-  rol: { fontSize: 12, marginTop: 2 },
-  switchFila: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderRadius: 14,
-    borderWidth: 1,
-    padding: 14,
-    marginTop: 14,
-  },
-  rolCaja: {
-    flexDirection: "row",
-    alignItems: "center",
-    borderRadius: 12,
-    borderWidth: 1,
-    padding: 13,
-  },
-});

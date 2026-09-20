@@ -19,7 +19,7 @@
 //    con <Monto> para los totales.
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { Modal, View, TextInput, ScrollView, Pressable, ActivityIndicator, BackHandler } from "react-native";
+import { Modal, View, TextInput, ScrollView, Pressable, ActivityIndicator, BackHandler, KeyboardAvoidingView } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import {
   ProveedorResumen,
@@ -672,6 +672,15 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
 
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
+      {/* KeyboardAvoidingView envolviendo la SafeAreaView: este modal no
+          usa <Hoja>, así que no heredaba nada. Y app.json tampoco basta —
+          `softwareKeyboardLayoutMode: "resize"` deja de redimensionar la
+          ventana con `edgeToEdgeEnabled: true`, así que el teclado se monta
+          ENCIMA en vez de encoger la pantalla.
+
+          "padding" y no "height": "height" anima la altura del contenedor y
+          rebota al cerrarse el teclado. Mismo criterio que <Hoja>. */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
       <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <CabeceraModal titulo={cabecera.titulo} onIzquierda={cabecera.onIzquierda} izquierda={cabecera.izquierda} />
         {vista === "lista" && VistaLista()}
@@ -679,6 +688,7 @@ export default function ModalProveedores({ onCerrar, onCambio }: Props) {
         {vista === "form" && VistaForm()}
         {vista === "compra" && VistaCompra()}
       </SafeAreaView>
+      </KeyboardAvoidingView>
 
       {/* Confirmación de eliminar: hoja chica, sin Alert nativo. */}
       <Hoja

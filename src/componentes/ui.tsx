@@ -44,6 +44,27 @@ import {
   type ViewStyle,
   type TextStyle,
 } from "react-native";
+// ---------------------------------------------------------------------------
+// POR QUÉ EL TECLADO VIENE DE UNA LIBRERÍA Y NO DE REACT NATIVE
+// ---------------------------------------------------------------------------
+// El KeyboardAvoidingView de React Native SÍ recibe bien los eventos del
+// teclado en Android, pero lo único que hace es añadir relleno abajo. Eso
+// basta cuando el contenedor está anclado abajo —una hoja sube entera y se ve
+// el efecto— y NO basta en una pantalla completa: el ScrollView se encoge, el
+// campo deja de estar tapado, pero nadie lo desplaza hasta ponerlo a la vista.
+// El usuario tiene que arrastrar él, y en un formulario largo eso se percibe,
+// con razón, como que el teclado "tapa" las cosas.
+//
+// `react-native-keyboard-controller` sí desplaza hasta el campo enfocado, y
+// además está construido para `edgeToEdgeEnabled`, donde la ventana ya no se
+// redimensiona. Es dependencia NATIVA: no corre en Expo Go, requiere build.
+//
+// El KeyboardProvider tiene que envolver la app en el layout raíz; sin él
+// estos componentes se comportan como los de React Native.
+import {
+  KeyboardAvoidingView,
+  KeyboardAwareScrollView,
+} from "react-native-keyboard-controller";
 import { useTema } from "@/src/componentes/TemaProvider";
 
 type Tema = ReturnType<typeof useTema>["tema"];
@@ -181,14 +202,19 @@ export function Pantalla({
   }
   return (
     <View style={est}>
-      <ScrollView
+      {/* Antes: <ScrollView> envuelto en un KeyboardAvoidingView. El campo
+          dejaba de estar tapado pero había que desplazarse a mano hasta él.
+          `bottomOffset` deja un respiro entre el campo y el borde del teclado
+          para que no quede lamiendo la primera fila de teclas. */}
+      <KeyboardAwareScrollView
         contentContainerStyle={inner}
         showsVerticalScrollIndicator={false}
         keyboardShouldPersistTaps="handled"
+        bottomOffset={16}
         refreshControl={refresco as never}
       >
         {children}
-      </ScrollView>
+      </KeyboardAwareScrollView>
     </View>
   );
 }
@@ -293,6 +319,26 @@ export function Seccion({
 // Si en una pantalla hay dos láminas, ninguna es protagonista y la jerarquía
 // se pierde: es exactamente lo que pasaba antes, cuando la tarjeta de
 // "Vendido hoy" tenía el mismo peso visual que "Departamentos".
+/** Opacidades del halo de <Lamina>, de arriba abajo.
+ *
+ *  El halo se dibuja con el color de ACENTO (no con acentoSuave) y sustituye
+ *  al filo sólido que antes iba encima. Ese filo era un <View> aparte de
+ *  3 px: se leía como una línea pegada sobre la tarjeta, no como parte de
+ *  ella — y era lo que más chocaba. Naciendo el degradado del propio acento,
+ *  el borde superior ES el punto más intenso de la luz, no un elemento
+ *  distinto.
+ *
+ *  40 bandas de ~15 px: a esa escala no se distinguen los escalones. La
+ *  caída es lenta (exponente 1.15), así que a media altura todavía queda
+ *  algo de color y muere justo en el borde inferior — el degradado recorre
+ *  la tarjeta entera en vez de apagarse arriba. */
+const BANDAS_HALO = [
+  0.42, 0.408, 0.395, 0.383, 0.371, 0.359, 0.347, 0.335, 0.323, 0.311,
+  0.299, 0.287, 0.275, 0.263, 0.252, 0.24, 0.229, 0.217, 0.206, 0.195,
+  0.184, 0.173, 0.162, 0.151, 0.14, 0.129, 0.119, 0.108, 0.098, 0.088,
+  0.078, 0.068, 0.058, 0.049, 0.04, 0.031, 0.022, 0.014, 0.006, 0,
+];
+
 export function Lamina({
   children,
   onPress,
@@ -317,31 +363,25 @@ export function Lamina({
         elevation: 4,
       }}
     >
-      {/* La luz: filo de acento en el borde superior. */}
-      <View
-        style={{
-          position: "absolute",
-          top: 0,
-          left: 0,
-          right: 0,
-          height: 3,
-          backgroundColor: T.acento,
-        }}
-      />
-      {/* Halo que baja del filo y se apaga. Sin gradientes: capas de opacidad
-          decreciente. Si algún día entra expo-linear-gradient, esto se
-          sustituye por un degradado real y se ve aún mejor. */}
+
+      {/* Halo que baja del filo y se apaga a lo largo de TODA la lámina.
+          Antes era un único bloque sólido de 28 px: no se leía como luz sino
+          como una franja de color pegada arriba, con un corte duro justo
+          donde terminaba. Ese corte era lo que hacía que la lámina pareciera
+          sin terminar.
+          Aquí son BANDAS de opacidad decreciente que llenan el alto
+          disponible (cada una flex:1, así funciona sea cual sea el
+          contenido). Con suficientes bandas el ojo no distingue los
+          escalones y lee un degradado continuo — sin necesitar
+          expo-linear-gradient ni ninguna dependencia nueva. */}
       <View
         pointerEvents="none"
-        style={{
-          position: "absolute",
-          top: 3,
-          left: 0,
-          right: 0,
-          height: 28,
-          backgroundColor: T.acentoSuave,
-        }}
-      />
+        style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0 }}
+      >
+        {BANDAS_HALO.map((op, i) => (
+          <View key={i} style={{ flex: 1, backgroundColor: T.acento, opacity: op }} />
+        ))}
+      </View>
       <View
         pointerEvents="none"
         style={{
@@ -537,6 +577,7 @@ export function Hoja({
   tipo = "hoja",
   children,
   pie,
+  superposicion,
 }: {
   visible: boolean;
   onCerrar: () => void;
@@ -545,9 +586,43 @@ export function Hoja({
   children: ReactNode;
   /** Acciones fijas abajo, en la zona del pulgar. */
   pie?: ReactNode;
+  /** Capa a pantalla COMPLETA por encima de cabecera, contenido y pie.
+   *
+   *  Existe porque un overlay puesto como hijo de `children` vive dentro del
+   *  ScrollView: su `absoluteFill` se mide contra el contenido desplazable
+   *  (miles de px), no contra la pantalla, y termina dibujado abajo del todo
+   *  y con sus propios botones fuera de vista. Además cabecera y pie, que
+   *  son hermanos del ScrollView, seguian pintandose ENCIMA.
+   *
+   *  Mientras haya superposicion, el `pie` NO se renderiza: si se deja, el
+   *  boton primario del formulario sigue visible y pulsable por encima de un
+   *  flujo que aun no ha terminado. Eso es lo que hacia que "Crear producto"
+   *  se pudiera tocar con el recortador abierto, creando el producto SIN la
+   *  foto y sin ningun aviso. */
+  superposicion?: ReactNode;
 }) {
   const { tema: T } = useTema();
   const esHoja = tipo === "hoja";
+  // El teclado se montaba ENCIMA del contenido y tapaba campos y botones.
+  //
+  // Dentro de un <Modal> de React Native, el `adjustResize` de Android no
+  // llega a aplicarse (el modal vive en su propia ventana), así que no basta
+  // con la configuración de la app: hace falta un KeyboardAvoidingView aquí,
+  // envolviendo las dos variantes de Hoja.
+  //
+  // "padding" en las DOS plataformas.
+  //
+  // Antes aquí había "height" en Android, y provocaba un rebote al cerrarse
+  // el teclado: "height" anima la altura del contenedor, y esa animación
+  // pelea con el redimensionado que el propio sistema ya aplica — el
+  // contenido subía y bajaba en bucle durante un instante. "padding" empuja
+  // el contenido sin tocar la altura, y no oscila.
+  // Con el KeyboardAvoidingView de `react-native-keyboard-controller` el
+  // "padding" sí se comporta igual en Android que en iOS. Se mantiene
+  // "padding" y NO "height": "height" anima la altura del contenedor y pelea
+  // con la animación del sistema, lo que hacía rebotar el contenido al
+  // cerrarse el teclado. Ya se probó.
+  const avoidTeclado = { behavior: "padding" as const };
   return (
     <Modal
       visible={visible}
@@ -557,7 +632,10 @@ export function Hoja({
       presentationStyle={esHoja ? "overFullScreen" : "fullScreen"}
     >
       {esHoja ? (
-        <View style={{ flex: 1, justifyContent: "flex-end" }}>
+        <KeyboardAvoidingView
+          style={{ flex: 1, justifyContent: "flex-end" }}
+          {...avoidTeclado}
+        >
           <Pressable
             onPress={onCerrar}
             style={{
@@ -601,11 +679,19 @@ export function Hoja({
             >
               {children}
             </ScrollView>
-            {pie ? <View style={{ marginTop: T.esps.lg }}>{pie}</View> : null}
+            {pie && !superposicion ? (
+              <View style={{ marginTop: T.esps.lg }}>{pie}</View>
+            ) : null}
           </View>
-        </View>
+          {superposicion ? (
+            <View style={StyleSheet.absoluteFill}>{superposicion}</View>
+          ) : null}
+        </KeyboardAvoidingView>
       ) : (
-        <View style={{ flex: 1, backgroundColor: T.fondo }}>
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: T.fondo }}
+          {...avoidTeclado}
+        >
           <CabeceraModal titulo={titulo ?? ""} izquierda="Cerrar" onIzquierda={onCerrar} />
           <ScrollView
             contentContainerStyle={{
@@ -617,7 +703,7 @@ export function Hoja({
           >
             {children}
           </ScrollView>
-          {pie ? (
+          {pie && !superposicion ? (
             <View
               style={{
                 padding: T.esp,
@@ -629,7 +715,12 @@ export function Hoja({
               {pie}
             </View>
           ) : null}
-        </View>
+          {/* Hermana de cabecera / scroll / pie, no hija del scroll: asi su
+              absoluteFill se mide contra la PANTALLA y tapa los tres. */}
+          {superposicion ? (
+            <View style={StyleSheet.absoluteFill}>{superposicion}</View>
+          ) : null}
+        </KeyboardAvoidingView>
       )}
     </Modal>
   );
@@ -836,6 +927,7 @@ export function CabeceraModal({
   titulo,
   izquierda = "Cancelar",
   derecha,
+  derechaNodo,
   onIzquierda,
   onDerecha,
   derechaCargando = false,
@@ -843,6 +935,18 @@ export function CabeceraModal({
   titulo: string;
   izquierda?: string;
   derecha?: string;
+  /** Contenido libre en el hueco derecho, en vez de una palabra.
+   *
+   *  Existe para meter ahí un control con forma propia —hoy, el acceso a
+   *  Yaxo— sin tener que inventar una cabecera aparte para esa pantalla ni
+   *  convertir un dibujo en la palabra "Yaxo", que rompería el idioma visual
+   *  del resto de la app.
+   *
+   *  Es OPCIONAL y no cambia ninguna llamada existente: sin ella, la cabecera
+   *  se comporta exactamente igual que siempre. Manda sobre `derecha` y sobre
+   *  el indicador de carga, porque quien pasa un nodo está diciendo que ese
+   *  hueco es suyo. */
+  derechaNodo?: ReactNode;
   onIzquierda: () => void;
   onDerecha?: () => void;
   derechaCargando?: boolean;
@@ -857,18 +961,22 @@ export function CabeceraModal({
       <Text style={ec.titulo} numberOfLines={1}>
         {titulo}
       </Text>
-      <Pressable
-        onPress={onDerecha}
-        disabled={!onDerecha || derechaCargando}
-        hitSlop={12}
-        style={[ec.lado, { alignItems: "flex-end" }]}
-      >
-        {derechaCargando ? (
-          <ActivityIndicator color={T.acento} size="small" />
-        ) : derecha ? (
-          <Text style={ec.der}>{derecha}</Text>
-        ) : null}
-      </Pressable>
+      {derechaNodo ? (
+        <View style={[ec.lado, { alignItems: "flex-end" }]}>{derechaNodo}</View>
+      ) : (
+        <Pressable
+          onPress={onDerecha}
+          disabled={!onDerecha || derechaCargando}
+          hitSlop={12}
+          style={[ec.lado, { alignItems: "flex-end" }]}
+        >
+          {derechaCargando ? (
+            <ActivityIndicator color={T.acento} size="small" />
+          ) : derecha ? (
+            <Text style={ec.der}>{derecha}</Text>
+          ) : null}
+        </Pressable>
+      )}
     </View>
   );
 }

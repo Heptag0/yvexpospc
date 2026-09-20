@@ -9,6 +9,7 @@
 //     suma de componentes; su stock es virtual (según componentes)
 
 import { bd, uuid, ahoraISO } from "./db";
+import { exigirPermiso } from "./permisos";
 import { borrarImagen } from "./imagenes";
 import { encolar } from "./sync";
 
@@ -33,6 +34,9 @@ export type Producto = {
   es_kit: number;
   favorito: number;
   imagen_uri: string | null;
+  /** Porcentaje entero (0 o 16, igual que el PC) — NO puntos base. Ver
+   *  impuestos.ts::puntosBaseDesdePct() para la conversión real al cobrar. */
+  iva_tasa: number;
 };
 
 export type ProductoLista = Producto & {
@@ -73,6 +77,10 @@ export type DatosProducto = {
   es_kit: boolean;
   favorito: boolean;
   imagen_uri: string | null;
+  /** Porcentaje entero: 0 (exento) o 16 (IVA general MX) — mismo rango que
+   *  el CHECK del PC. Solo importa si el impuesto está activo en Ajustes;
+   *  si está apagado, este valor queda guardado pero no afecta nada. */
+  iva_tasa: number;
   componentes: { producto_id: string; cantidad: number }[];
 };
 
@@ -140,9 +148,14 @@ export async function listarProductos(opciones?: {
   const kits = filas.filter((f) => f.es_kit === 1);
   if (kits.length) {
     const disp = await db.getAllAsync<{ kit_id: string; disp: number }>(
+      // kc.eliminado = 0 es IMPRESCINDIBLE: al editar un kit, las piezas que
+      // se quitan se marcan como eliminadas en vez de borrarse (así la baja
+      // viaja a las otras cajas). Sin el filtro se cuentan las versiones
+      // viejas y la disponibilidad sale mal.
       `SELECT kc.kit_id, CAST(MIN(p2.stock / kc.cantidad) AS INTEGER) AS disp
        FROM kit_componentes kc
        JOIN productos p2 ON p2.id = kc.producto_id
+       WHERE kc.eliminado = 0
        GROUP BY kc.kit_id`
     );
     const mapa = new Map(disp.map((d) => [d.kit_id, Math.max(0, d.disp)]));
@@ -177,7 +190,7 @@ export async function componentesDeKit(kitId: string): Promise<ComponenteKit[]> 
   return db.getAllAsync<ComponenteKit>(
     `SELECT kc.producto_id, p.nombre, kc.cantidad, p.stock, p.costo_centavos
      FROM kit_componentes kc JOIN productos p ON p.id = kc.producto_id
-     WHERE kc.kit_id = ? ORDER BY p.nombre COLLATE NOCASE`,
+     WHERE kc.kit_id = ? AND kc.eliminado = 0 ORDER BY p.nombre COLLATE NOCASE`,
     [kitId]
   );
 }
@@ -185,6 +198,33 @@ export async function componentesDeKit(kitId: string): Promise<ComponenteKit[]> 
 // ---------------------------------------------------------------------------
 // Productos: crear / editar / eliminar
 // ---------------------------------------------------------------------------
+
+/** Costo de un kit: la SUMA de (costo del componente x cantidad).
+ *
+ *  Un valor derivado no puede venir del formulario. El PC ya lo calculaba al
+ *  crear, pero al editar respetaba el costo que mandaba la pantalla (que
+ *  llega precargado con el viejo): cambiabas el kit de 20 piezas a 2 y el
+ *  costo se quedaba en el de 20, con el margen y el precio de venta
+ *  calculados sobre una mentira. El móvil ni siquiera lo calculaba: escribía
+ *  lo que dijera el formulario, así que el desfase era permanente.
+ *
+ *  Se redondea al centavo en cada línea (la cantidad puede ser decimal),
+ *  igual que kits.rs::costo_calculado del PC. */
+async function costoCalculadoKit(
+  componentes: { producto_id: string; cantidad: number }[]
+): Promise<number> {
+  if (!componentes.length) return 0;
+  const db = await bd();
+  let total = 0;
+  for (const c of componentes) {
+    const p = await db.getFirstAsync<{ costo_centavos: number | null }>(
+      "SELECT costo_centavos FROM productos WHERE id = ? AND eliminado = 0",
+      [c.producto_id]
+    );
+    total += Math.round((p?.costo_centavos ?? 0) * c.cantidad);
+  }
+  return total;
+}
 
 function validar(d: DatosProducto): void {
   if (!d.nombre.trim()) throw new Error("El nombre del producto no puede estar vacío.");
@@ -195,6 +235,11 @@ function validar(d: DatosProducto): void {
     throw new Error(`Unidad inválida: ${d.unidad}`);
   if (d.es_kit && d.componentes.length === 0)
     throw new Error("Un kit necesita al menos un componente.");
+  // Mismo rango que el CHECK (iva_tasa IN (0, 16)) del PC. SQLite no deja
+  // añadir un CHECK con ALTER TABLE sobre una tabla existente (ver
+  // db.ts, migración v31), así que la regla vive aquí.
+  if (d.iva_tasa !== 0 && d.iva_tasa !== 16)
+    throw new Error("La tasa de IVA debe ser 0% (exento) o 16%.");
 }
 
 function normalizarCodigo(codigo: string | null): string | null {
@@ -217,24 +262,64 @@ async function verificarCodigoUnico(codigo: string, exceptoId?: string): Promise
   if (dup) throw new Error("Ya existe un producto con ese código de barras.");
 }
 
+/** Reemplaza la lista de componentes de un kit y la sincroniza.
+ *
+ *  BORRADO SUAVE, no DELETE. Editar un kit REEMPLAZA su lista, y con borrado
+ *  duro la fila desaparecía sin dejar rastro: el otro dispositivo nunca se
+ *  enteraba de que quitaste una pieza y se quedaba con la lista vieja,
+ *  descontando stock de más en cada venta.
+ *
+ *  Y se ENCOLA, que antes no ocurría en ninguna de las dos plataformas: el
+ *  kit llegaba al PC marcado como kit pero VACÍO. Allá no se podía editar
+ *  (la pantalla exige al menos un componente) y venderlo NO DESCONTABA NADA,
+ *  porque el kit no tiene stock propio — se deriva de sus piezas. */
 async function guardarComponentes(
   kitId: string,
   componentes: { producto_id: string; cantidad: number }[]
 ): Promise<void> {
   const db = await bd();
-  await db.runAsync("DELETE FROM kit_componentes WHERE kit_id = ?", [kitId]);
   const ahora = ahoraISO();
+
+  const previos = await db.getAllAsync<{ id: string }>(
+    "SELECT id FROM kit_componentes WHERE kit_id = ? AND eliminado = 0",
+    [kitId]
+  );
+  for (const p of previos) {
+    await db.runAsync(
+      "UPDATE kit_componentes SET eliminado = 1, actualizado_en = ? WHERE id = ?",
+      [ahora, p.id]
+    );
+    await encolar("kit_componentes", p.id,
+      { id: p.id, eliminado: 1, actualizado_en: ahora }, "update");
+  }
+
   for (const c of componentes) {
     if (c.cantidad <= 0) continue;
+    const id = uuid();
     await db.runAsync(
-      `INSERT INTO kit_componentes (id, kit_id, producto_id, cantidad, creado_en)
-       VALUES (?,?,?,?,?)`,
-      [uuid(), kitId, c.producto_id, c.cantidad, ahora]
+      `INSERT INTO kit_componentes (id, kit_id, producto_id, cantidad, eliminado, creado_en, actualizado_en)
+       VALUES (?,?,?,?,0,?,?)`,
+      [id, kitId, c.producto_id, c.cantidad, ahora, ahora]
     );
+    // El servidor la llama `producto_componente_id` (nombre canónico, el del
+    // PC): distingue sin ambigüedad la pieza del paquete, ya que los dos son
+    // productos. Aquí se traduce al construir el payload.
+    await encolar("kit_componentes", id, {
+      id, kit_id: kitId, producto_componente_id: c.producto_id,
+      cantidad: c.cantidad, eliminado: 0,
+      creado_en: ahora, actualizado_en: ahora,
+    });
   }
 }
 
+/** Da de baja TODOS los componentes de un kit (cuando deja de ser kit, o al
+ *  eliminar el producto). Mismo criterio: suave y sincronizado. */
+async function bajaComponentes(kitId: string): Promise<void> {
+  await guardarComponentes(kitId, []);
+}
+
 export async function crearProducto(d: DatosProducto): Promise<string> {
+  await exigirPermiso("editarCatalogo");
   validar(d);
   const db = await bd();
   const codigo = normalizarCodigo(d.codigo_barras);
@@ -242,6 +327,10 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
 
   const id = uuid();
   const ahora = ahoraISO();
+  // El costo de un kit NO se toma del formulario: se deriva de sus piezas.
+  const costoFinal = d.es_kit
+    ? await costoCalculadoKit(d.componentes)
+    : d.costo_centavos;
   // Antes: INSERT + guardarComponentes() (que a su vez hace DELETE + varios
   // INSERT) eran llamadas sueltas, sin transacción. Si algo fallaba entre
   // medio, un kit podía quedar creado con sus componentes a medias — o sin
@@ -252,26 +341,35 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
       `INSERT INTO productos
         (id, codigo_barras, nombre, categoria_id, precio_venta_centavos,
          costo_centavos, precio_mayoreo_centavos, controla_stock, stock,
-         stock_minimo, unidad, es_kit, favorito, imagen_uri, activo, eliminado, creado_en, actualizado_en)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
+         stock_minimo, unidad, es_kit, favorito, imagen_uri, iva_tasa, activo, eliminado, creado_en, actualizado_en)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,0,?,?)`,
       [
         id, codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
-        d.costo_centavos, d.precio_mayoreo_centavos,
+        costoFinal, d.precio_mayoreo_centavos,
         d.es_kit ? 0 : d.controla_stock ? 1 : 0,
         d.es_kit ? 0 : d.stock,
         d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
-        d.imagen_uri, ahora, ahora,
+        d.imagen_uri, d.iva_tasa, ahora, ahora,
       ]
     );
     if (d.es_kit) await guardarComponentes(id, d.componentes);
 
     await encolar("productos", id, {
       id, codigo_barras: codigo, nombre: d.nombre.trim(), categoria_id: d.categoria_id,
-      precio_venta_centavos: d.precio_venta_centavos, costo_centavos: d.costo_centavos,
-      precio_mayoreo_centavos: d.precio_mayoreo_centavos, cantidad_mayoreo: null,
-      iva_tasa: 0, controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
+      precio_venta_centavos: d.precio_venta_centavos, costo_centavos: costoFinal,
+      // `iva_tasa` SÍ se manda ahora — el móvil ya la guarda (migración v31).
+      // Antes se omitía a propósito porque no existía la columna; mandar
+      // `iva_tasa: 0` fijo era destructivo (pisaba el IVA real del PC en
+      // TODO el negocio con solo editar el precio desde el teléfono). Esa
+      // regla general se mantiene para lo que SÍ se sigue sin guardar aquí
+      // (`cantidad_mayoreo`, mayoreo automático — no implementado en móvil
+      // todavía): omitir una columna que no tienes es seguro; afirmar un
+      // valor que no tienes, no.
+      precio_mayoreo_centavos: d.precio_mayoreo_centavos,
+      controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
       stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, creado_en: ahora,
+      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, iva_tasa: d.iva_tasa,
+      eliminado: 0, creado_en: ahora,
       actualizado_en: ahora,
     });
   });
@@ -279,6 +377,7 @@ export async function crearProducto(d: DatosProducto): Promise<string> {
 }
 
 export async function editarProducto(d: DatosProducto): Promise<void> {
+  await exigirPermiso("editarCatalogo");
   if (!d.id) throw new Error("Falta el id del producto a editar.");
   validar(d);
   const db = await bd();
@@ -287,44 +386,58 @@ export async function editarProducto(d: DatosProducto): Promise<void> {
 
   const idProd = d.id;
   const ahoraEd = ahoraISO();
+  // Igual que al crear: el costo de un kit se RECALCULA desde sus piezas.
+  // Aquí es donde más se notaba el fallo, porque el formulario llega
+  // precargado con el costo viejo y lo reenviaba tal cual.
+  const costoFinalEd = d.es_kit
+    ? await costoCalculadoKit(d.componentes)
+    : d.costo_centavos;
   await db.withTransactionAsync(async () => {
     await db.runAsync(
       `UPDATE productos SET
         codigo_barras = ?, nombre = ?, categoria_id = ?, precio_venta_centavos = ?,
         costo_centavos = ?, precio_mayoreo_centavos = ?, controla_stock = ?,
-        stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, favorito = ?, imagen_uri = ?, actualizado_en = ?
+        stock = ?, stock_minimo = ?, unidad = ?, es_kit = ?, favorito = ?, imagen_uri = ?,
+        iva_tasa = ?, actualizado_en = ?
        WHERE id = ?`,
       [
         codigo, d.nombre.trim(), d.categoria_id, d.precio_venta_centavos,
-        d.costo_centavos, d.precio_mayoreo_centavos,
+        costoFinalEd, d.precio_mayoreo_centavos,
         d.es_kit ? 0 : d.controla_stock ? 1 : 0,
         d.es_kit ? 0 : d.stock,
         d.stock_minimo, d.unidad, d.es_kit ? 1 : 0, d.favorito ? 1 : 0,
-        d.imagen_uri, ahoraEd, idProd,
+        d.imagen_uri, d.iva_tasa, ahoraEd, idProd,
       ]
     );
     if (d.es_kit) await guardarComponentes(idProd, d.componentes);
-    else await db.runAsync("DELETE FROM kit_componentes WHERE kit_id = ?", [idProd]);
+    else await bajaComponentes(idProd);
 
     await encolar("productos", idProd, {
       id: idProd, codigo_barras: codigo, nombre: d.nombre.trim(),
       categoria_id: d.categoria_id, precio_venta_centavos: d.precio_venta_centavos,
-      costo_centavos: d.costo_centavos, precio_mayoreo_centavos: d.precio_mayoreo_centavos,
-      cantidad_mayoreo: null, iva_tasa: 0,
+      costo_centavos: costoFinalEd, precio_mayoreo_centavos: d.precio_mayoreo_centavos,
+      // `iva_tasa` SÍ se manda ahora (mismo motivo que en crearProducto,
+      // ver ese comentario). `cantidad_mayoreo` se sigue omitiendo: el móvil
+      // no implementa mayoreo automático todavía.
       controla_stock: d.es_kit ? 0 : d.controla_stock ? 1 : 0,
       stock: d.es_kit ? 0 : d.stock, unidad: d.unidad, stock_minimo: d.stock_minimo,
-      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, eliminado: 0, actualizado_en: ahoraEd,
+      favorito: d.favorito ? 1 : 0, es_kit: d.es_kit ? 1 : 0, iva_tasa: d.iva_tasa,
+      eliminado: 0, actualizado_en: ahoraEd,
     }, "update");
   });
 }
 
 export async function eliminarProducto(id: string): Promise<void> {
+  await exigirPermiso("editarCatalogo");
   const db = await bd();
   const p = await db.getFirstAsync<{ imagen_uri: string | null }>(
     "SELECT imagen_uri FROM productos WHERE id = ?", [id]
   );
   await borrarImagen(p?.imagen_uri ?? null);
-  await db.runAsync("DELETE FROM kit_componentes WHERE kit_id = ? OR producto_id = ?", [id, id]);
+  // Baja suave de los componentes de este kit. Los kits de OTROS productos
+  // que usaban este como pieza se quedan: el producto está eliminado y el
+  // catálogo ya lo refleja; borrarlos aquí perdería la composición histórica.
+  await bajaComponentes(id);
   const ahoraEl = ahoraISO();
   await db.runAsync(
     "UPDATE productos SET eliminado = 1, actualizado_en = ? WHERE id = ?",
@@ -344,6 +457,7 @@ export async function ajustarStock(
   nuevoStock: number,
   motivo: MotivoAjuste
 ): Promise<void> {
+  await exigirPermiso("ajustarStock");
   const db = await bd();
   // Antes: el UPDATE de stock y el INSERT del rastro en ajustes_inventario
   // eran dos llamadas sueltas. El propio encabezado de este archivo dice
@@ -409,6 +523,7 @@ export type ResultadoResurtido = {
 export async function aplicarResurtido(
   lineas: LineaResurtido[]
 ): Promise<ResultadoResurtido> {
+  await exigirPermiso("ajustarStock");
   const db = await bd();
   const res: ResultadoResurtido = { actualizados: 0, creados: 0, piezas: 0 };
 
@@ -467,7 +582,13 @@ export async function aplicarResurtido(
           precio_venta_centavos: l.precio_centavos ?? 0,
           costo_centavos: l.costo_centavos, precio_mayoreo_centavos: null,
           controla_stock: true, stock: l.piezas, stock_minimo: 0,
-          unidad: "pieza", es_kit: false, favorito: false, imagen_uri: null, componentes: [],
+          unidad: "pieza", es_kit: false, favorito: false, imagen_uri: null,
+          // El ticket del proveedor no trae dato de IVA — 0 (exento) es el
+          // default seguro, igual que el DEFAULT de la columna en SQLite.
+          // El dueño lo corrige después desde el catálogo si el producto sí
+          // lleva impuesto.
+          iva_tasa: 0,
+          componentes: [],
         });
         const clavePerfilNuevo = l.aliasClaves?.[0] ?? "";
         if (clavePerfilNuevo) {
@@ -508,6 +629,7 @@ export async function listarCategorias(): Promise<Categoria[]> {
 export async function crearCategoria(
   nombre: string, color: string, icono: string
 ): Promise<string> {
+  await exigirPermiso("editarCatalogo");
   if (!nombre.trim()) throw new Error("El nombre del departamento no puede estar vacío.");
   const db = await bd();
   const orden = (await db.getFirstAsync<{ n: number }>(
@@ -521,7 +643,11 @@ export async function crearCategoria(
     [id, nombre.trim(), orden, color, icono, ahora, ahora]
   );
   await encolar("categorias", id, {
-    id, nombre: nombre.trim(), color, eliminado: 0, creado_en: ahora, actualizado_en: ahora,
+    // `orden` e `icono` existen en el móvil y, desde la migración de esta
+    // ronda, también en Postgres. Sin mandarlos, reordenar o poner icono a
+    // un departamento desde el teléfono nunca se veía en el PC.
+    id, nombre: nombre.trim(), color, orden, icono: icono ?? null,
+    eliminado: 0, creado_en: ahora, actualizado_en: ahora,
   });
   return id;
 }
@@ -529,6 +655,7 @@ export async function crearCategoria(
 export async function editarCategoria(
   id: string, nombre: string, color: string, icono: string
 ): Promise<void> {
+  await exigirPermiso("editarCatalogo");
   if (!nombre.trim()) throw new Error("El nombre del departamento no puede estar vacío.");
   const db = await bd();
   const ahoraCat = ahoraISO();
@@ -553,6 +680,7 @@ export async function conteoPorDepartamento(): Promise<Map<string, number>> {
 }
 
 export async function eliminarCategoria(id: string): Promise<void> {
+  await exigirPermiso("editarCatalogo");
   const db = await bd();
   await db.runAsync("UPDATE productos SET categoria_id = NULL WHERE categoria_id = ?", [id]);
   const ahoraEC = ahoraISO();

@@ -482,9 +482,15 @@ export function etiquetaEntregaPedido(entrega: string | null | undefined): strin
   return entrega === "domicilio" ? "A domicilio" : "Recoger en tienda";
 }
 
-/** Etiqueta del pago del pedido ("efectivo" | "en_linea" del backend). */
+/** Etiqueta del pago del pedido ("efectivo" | "terminal" del backend desde
+ *  el punto 29 — PENDIENTES.md). "en_linea" ya no puede llegar en un
+ *  pedido NUEVO (el servidor lo rechaza al crear uno — punto 28), pero se
+ *  conserva la rama por si queda algún pedido viejo guardado con ese valor
+ *  de antes de la desactivación. */
 export function etiquetaPagoPedido(pago: string | null | undefined): string {
-  return pago === "en_linea" ? "Pago en línea" : "Efectivo al recibir";
+  if (pago === "terminal") return "Tarjeta al recibir";
+  if (pago === "en_linea") return "Pago en línea";
+  return "Efectivo al recibir";
 }
 
 // ---------------------------------------------------------------------------
@@ -585,12 +591,19 @@ export function urlMapaUbicacion(ubicacion: string | null | undefined): string {
 export const ORIGEN_VENTA_WEB = "web";
 
 /** Método de pago del POS para una venta web: efectivo si el cliente paga
- *  al recibir; pago en línea cae en "tarjeta" (el bucket no-efectivo del
- *  corte: ese dinero NO está en el cajón). */
+ *  al recibir en efectivo; tarjeta al recibir (terminal) y pago en línea
+ *  (solo pedidos viejos, ya no se pueden crear — punto 28) caen los dos en
+ *  "tarjeta", el bucket no-efectivo del corte: ese dinero NO está en el
+ *  cajón físico.
+ *
+ *  ⚠️ Antes solo distinguía "en_linea" vs "todo lo demás -> efectivo". Con
+ *  "terminal" nuevo (punto 29) esa rama lo habría contado como efectivo
+ *  por descarte — un pedido pagado con tarjeta habría inflado el cajón
+ *  esperado sin que ese dinero existiera ahí físicamente. */
 export function metodoPagoVentaWeb(
   pago: string | null | undefined
 ): "efectivo" | "tarjeta" {
-  return pago === "en_linea" ? "tarjeta" : "efectivo";
+  return pago === "terminal" || pago === "en_linea" ? "tarjeta" : "efectivo";
 }
 
 export type LineaVentaWeb = {

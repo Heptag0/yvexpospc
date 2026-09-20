@@ -30,8 +30,11 @@ export type Cliente = {
   puntos: number;
   /** Crédito (cobranza): límite que AVISA, no bloquea — la decisión es del
    *  cajero/dueño (ver src/base/credito.ts). limite = 0 significa "sin
-   *  límite definido". Estos dos campos no se tocan en crearCliente() ni
-   *  editarCliente(): nacen en 0 y solo credito.ts los modifica. */
+   *  límite definido". crearCliente()/editarCliente() SÍ lo escriben (es
+   *  un atributo del cliente, como su nombre) — lo que NUNCA tocan es
+   *  saldo_centavos: eso nace en 0 y solo credito.ts lo modifica, porque
+   *  el servidor lo recalcula con un trigger (ver comentario de
+   *  encolar("clientes"...) más abajo). */
   limite_credito_centavos: number;
   saldo_centavos: number;
   creado_en: string;
@@ -104,7 +107,8 @@ function correoLimpio(raw?: string): string | null {
 export async function crearCliente(
   nombre: string,
   telefono?: string,
-  correo?: string
+  correo?: string,
+  limiteCreditoCentavos?: number
 ): Promise<Cliente> {
   const nombreLimpio = nombre.trim();
   if (!nombreLimpio) throw new Error("Escribe el nombre del cliente.");
@@ -113,23 +117,28 @@ export async function crearCliente(
   const codigo = await generarCodigoCliente();
   const ahora = ahoraISO();
   const correoOk = correoLimpio(correo);
+  // Límite de crédito: atributo del cliente, como su nombre — SÍ se manda,
+  // a diferencia de saldo_centavos (ver comentario del tipo Cliente,
+  // arriba). Antes esto no existía en absoluto: todo cliente creado desde
+  // el móvil quedaba con crédito ILIMITADO en la práctica (limite=0 ==
+  // "sin límite definido" para verificarLimite() en credito.ts), sin
+  // ninguna protección, ni al crear ni después.
+  const limite = Math.max(0, Math.round(limiteCreditoCentavos ?? 0));
   await db.runAsync(
     `INSERT INTO clientes
-      (id, codigo, nombre, telefono, correo, notas, puntos, eliminado, creado_en, actualizado_en)
-     VALUES (?,?,?,?,?,NULL,0,0,?,?)`,
-    [id, codigo, nombreLimpio, telefono?.trim() || null, correoOk, ahora, ahora]
+      (id, codigo, nombre, telefono, correo, notas, puntos, limite_credito_centavos, saldo_centavos, eliminado, creado_en, actualizado_en)
+     VALUES (?,?,?,?,?,NULL,0,?,0,0,?,?)`,
+    [id, codigo, nombreLimpio, telefono?.trim() || null, correoOk, limite, ahora, ahora]
   );
-  // Nota: "limite_credito_centavos" / "saldo_centavos" no van aquí porque el
-  // móvil no maneja crédito — el servidor los rellena con su default (0) al
-  // recibir un payload parcial. No hace falta mandarlos.
   await encolar("clientes", id, {
     id, nombre: nombreLimpio, telefono: telefono?.trim() || null,
     correo: correoOk, codigo, notas: null,
+    limite_credito_centavos: limite,
     creado_en: ahora, actualizado_en: ahora, eliminado: 0,
   });
   return {
     id, codigo, nombre: nombreLimpio, telefono: telefono?.trim() || null, correo: correoOk,
-    notas: null, puntos: 0, limite_credito_centavos: 0, saldo_centavos: 0, creado_en: ahora,
+    notas: null, puntos: 0, limite_credito_centavos: limite, saldo_centavos: 0, creado_en: ahora,
   };
 }
 
@@ -138,7 +147,8 @@ export async function editarCliente(
   nombre: string,
   telefono?: string,
   notas?: string,
-  correo?: string
+  correo?: string,
+  limiteCreditoCentavos?: number
 ): Promise<void> {
   const nombreLimpio = nombre.trim();
   if (!nombreLimpio) throw new Error("Escribe el nombre del cliente.");
@@ -146,14 +156,17 @@ export async function editarCliente(
   const actualizado_en = ahoraISO();
   const correoOk = correoLimpio(correo);
   const notasOk = notas?.trim() || null;
+  const limite = Math.max(0, Math.round(limiteCreditoCentavos ?? 0));
   await db.runAsync(
-    `UPDATE clientes SET nombre = ?, telefono = ?, correo = ?, notas = ?, actualizado_en = ?
+    `UPDATE clientes SET nombre = ?, telefono = ?, correo = ?, notas = ?,
+            limite_credito_centavos = ?, actualizado_en = ?
      WHERE id = ?`,
-    [nombreLimpio, telefono?.trim() || null, correoOk, notasOk, actualizado_en, id]
+    [nombreLimpio, telefono?.trim() || null, correoOk, notasOk, limite, actualizado_en, id]
   );
   await encolar("clientes", id, {
     id, nombre: nombreLimpio, telefono: telefono?.trim() || null,
-    correo: correoOk, notas: notasOk, actualizado_en,
+    correo: correoOk, notas: notasOk, limite_credito_centavos: limite,
+    actualizado_en,
   }, "update");
 }
 

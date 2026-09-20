@@ -38,12 +38,18 @@ export type IdHerramienta =
   | "credito"
   | "lealtad"
   | "tienda"
-  | "pedidos";
+  | "pedidos"
+  | "devoluciones";
 
 export type Herramienta = {
   id: IdHerramienta;
   icono: IdUI;
   titulo: string;
+  /** Nombre corto para el mosaico de accesos de Inicio, donde solo hay una
+   *  línea de ancho. Sin esto, "Devolver o cancelar" se partía en dos
+   *  renglones y "Departamentos" se cortaba a mitad de palabra. Si se omite,
+   *  se usa `titulo`. */
+  corto?: string;
   meta: string;
   /** Palabras extra para el buscador: cómo lo llamaría un tendero. */
   alias: string;
@@ -112,6 +118,14 @@ export const GRUPOS_HERRAMIENTAS: GrupoHerramientas[] = [
         alias: "presupuesto precio cliente enviar",
       },
       {
+        id: "devoluciones",
+        icono: "devolucion",
+        titulo: "Devolver o cancelar",
+        corto: "Devoluciones",
+        meta: "Busca una venta y devuelve o cancela lo que corresponda",
+        alias: "reembolso regreso cancelacion nota credito",
+      },
+      {
         id: "dinero",
         icono: "dinero",
         titulo: "Dinero",
@@ -128,6 +142,7 @@ export const GRUPOS_HERRAMIENTAS: GrupoHerramientas[] = [
         id: "lealtad",
         icono: "regalo",
         titulo: "Clientes y lealtad",
+        corto: "Lealtad",
         meta: "Puntos por compra y visita, canjeables al cobrar",
         alias: "puntos premios clientes frecuentes tarjeta",
       },
@@ -262,6 +277,19 @@ export async function alternarAnclada(
 // ---------------------------------------------------------------------------
 // Visibilidad de la fila de accesos en Inicio
 // ---------------------------------------------------------------------------
+//
+// ⚠️ HISTORIA, PARA QUE NO SE REPITA: esto era un interruptor de UN SOLO
+// SENTIDO. Inicio llamaba a guardarAccesosOcultos(true) desde su enlace
+// "Ocultar", y NINGUNA parte de la app lo devolvía a `false` — ni ajustes.tsx,
+// ni el panel. Quien lo tocaba una vez perdía sus accesos para siempre, sin
+// más salida que borrar los datos de la aplicación.
+//
+// La vuelta vive ahora en el panel de Herramientas, en la sección "Tus
+// accesos": es el sitio que ya es dueño del concepto, y al que se llega desde
+// el tirador que Inicio siempre tiene a la vista. Regla general para este
+// archivo: si se añade un ajuste que ESCONDE algo, en el mismo commit tiene
+// que existir el control que lo devuelve, y tiene que estar donde el usuario
+// va a buscarlo.
 
 export async function leerAccesosOcultos(): Promise<boolean> {
   try {

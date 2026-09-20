@@ -23,6 +23,7 @@
 // LOCAL-ONLY (v1), mismo criterio que despensa y perfiles_etiqueta.
 
 import { bd, uuid, ahoraISO } from "./db";
+import { exigirPermiso } from "./permisos";
 import { obtenerIngrediente } from "./despensa";
 import { crearProducto } from "./inventario";
 import { guardarPerfil } from "./etiquetas";
@@ -251,6 +252,7 @@ export async function obtenerReceta(id: string): Promise<Receta | null> {
  *  crearProductoDesdeReceta(), para no desvincular sin querer un producto ya
  *  creado con solo editar la receta. */
 export async function guardarReceta(d: NuevaReceta): Promise<string> {
+  await exigirPermiso("editarRecetas");
   const nombre = d.nombre.trim();
   if (!nombre) throw new Error("Ponle un nombre a la receta.");
   if (d.lineas.length === 0) throw new Error("Agrega al menos un ingrediente a la receta.");
@@ -310,6 +312,7 @@ export async function guardarReceta(d: NuevaReceta): Promise<string> {
 }
 
 export async function eliminarReceta(id: string): Promise<void> {
+  await exigirPermiso("editarRecetas");
   const db = await bd();
   const res = await db.runAsync(
     "UPDATE recetas SET eliminado = 1, actualizado_en = ? WHERE id = ?",
@@ -336,6 +339,7 @@ export async function crearProductoDesdeReceta(
   precioVentaCentavos?: number | null,
   categoriaId?: string | null
 ): Promise<string> {
+  await exigirPermiso("editarRecetas");
   const receta = await obtenerReceta(recetaId);
   if (!receta) throw new Error("No se encontró la receta.");
   if (receta.producto_id) {

@@ -28,7 +28,7 @@
 // 4. No había T.turquesa en este archivo — ya usaba T.texto correctamente.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { View, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, Platform, ActivityIndicator, Share, BackHandler } from "react-native";
+import { View, TextInput, Pressable, Modal, ScrollView, KeyboardAvoidingView, ActivityIndicator, Share, BackHandler } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { Boton, Banner, CabeceraModal, Campo, Hoja, Grupo, Fila, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
@@ -524,7 +524,19 @@ export default function ModalCotizaciones({
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
       <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
-        <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <KeyboardAvoidingView style={{ flex: 1 }} // "padding" en las DOS plataformas.
+              //
+              // Antes: Platform.OS === "ios" ? "padding" : undefined. En
+              // Android eso era literalmente NINGUNA evitación de teclado. Era
+              // correcto cuando `softwareKeyboardLayoutMode: "resize"`
+              // redimensionaba la ventana, pero con `edgeToEdgeEnabled: true`
+              // la ventana ya no se encoge: la app dibuja por debajo del
+              // teclado, y los campos quedaban tapados.
+              //
+              // NO "height", que es la otra tentación: anima la altura del
+              // contenedor y pelea con la animación del sistema, así que el
+              // contenido rebota al cerrarse el teclado. Ya se probó.
+              behavior="padding">
           <CabeceraModal titulo={cabecera.titulo} izquierda={cabecera.izquierda} onIzquierda={cabecera.onIzquierda} />
           {vista === "lista" && VistaLista()}
           {vista === "form" && VistaForm()}

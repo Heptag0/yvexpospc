@@ -34,16 +34,19 @@ import {
   Modal,
   FlatList,
   ScrollView,
-  KeyboardAvoidingView,
-  Platform,
   Share,
   BackHandler,
 } from "react-native";
+// El KeyboardAvoidingView viene de `react-native-keyboard-controller`, no de
+// React Native: ver el porqué en ui.tsx. Misma API, mismo "padding", pero
+// construido para `edgeToEdgeEnabled`, donde la ventana ya no se redimensiona
+// sola al abrirse el teclado.
+import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { Boton, Banner, CabeceraModal, Hoja, Grupo, Fila, Lamina, Txt, Monto, Vacio, useEstiloInput } from "@/src/componentes/ui";
 import CodigoCliente from "@/src/componentes/CodigoCliente";
-import { pesos, fmtFecha } from "@/src/base/formato";
+import { pesos, fmtFecha, aCentavos, centavosATexto } from "@/src/base/formato";
 import {
   Cliente,
   MovimientoPuntos,
@@ -86,6 +89,11 @@ export default function ModalLealtad({
   const [telefono, setTelefono] = useState("");
   const [correo, setCorreo] = useState("");
   const [notas, setNotas] = useState("");
+  // Límite de crédito: antes NO existía forma de asignarlo desde el móvil,
+  // ni al crear ni después — un cliente creado aquí quedaba con crédito
+  // ILIMITADO en la práctica (ver el comentario en lealtad.ts). Vacío =
+  // sin límite definido, igual que 0 en la base.
+  const [limiteCredito, setLimiteCredito] = useState("");
   const [guardando, setGuardando] = useState(false);
 
   const cargar = useCallback(async () => {
@@ -132,7 +140,12 @@ export default function ModalLealtad({
     setError("");
     setGuardando(true);
     try {
-      const c = await crearCliente(nombre, telefono, correo);
+      const c = await crearCliente(
+        nombre,
+        telefono,
+        correo,
+        limiteCredito.trim() ? aCentavos(limiteCredito) : 0
+      );
       await cargar();
       onCambio?.();
       const correoRechazado = correo.trim() !== "" && !correoValido(correo);
@@ -140,6 +153,7 @@ export default function ModalLealtad({
       setTelefono("");
       setCorreo("");
       setNotas("");
+      setLimiteCredito("");
       abrirDetalle(c); // cae directo en su tarjeta QR, listo para enseñar
       if (correoRechazado) {
         // Nunca bloqueamos el alta por un correo raro: solo avisamos.
@@ -160,7 +174,8 @@ export default function ModalLealtad({
     setError("");
     setGuardando(true);
     try {
-      await editarCliente(seleccionado.id, nombre, telefono, notas, correo);
+      const limite = limiteCredito.trim() ? aCentavos(limiteCredito) : 0;
+      await editarCliente(seleccionado.id, nombre, telefono, notas, correo, limite);
       await cargar();
       onCambio?.();
       const correoRechazado = correo.trim() !== "" && !correoValido(correo);
@@ -170,6 +185,7 @@ export default function ModalLealtad({
         telefono: telefono.trim() || null,
         correo: correoRechazado ? seleccionado.correo : correo.trim().toLowerCase() || null,
         notas: notas.trim() || null,
+        limite_credito_centavos: limite,
       });
       setVista("detalle");
       if (correoRechazado) {
@@ -253,7 +269,19 @@ export default function ModalLealtad({
       <SafeAreaView style={{ flex: 1, backgroundColor: T.fondo }}>
         <KeyboardAvoidingView
           style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
+          // "padding" en las DOS plataformas.
+              //
+              // Antes: Platform.OS === "ios" ? "padding" : undefined. En
+              // Android eso era literalmente NINGUNA evitación de teclado. Era
+              // correcto cuando `softwareKeyboardLayoutMode: "resize"`
+              // redimensionaba la ventana, pero con `edgeToEdgeEnabled: true`
+              // la ventana ya no se encoge: la app dibuja por debajo del
+              // teclado, y los campos quedaban tapados.
+              //
+              // NO "height", que es la otra tentación: anima la altura del
+              // contenedor y pelea con la animación del sistema, así que el
+              // contenido rebota al cerrarse el teclado. Ya se probó.
+              behavior="padding"
         >
           {vista === "lista" && (
             <CabeceraModal
@@ -265,6 +293,7 @@ export default function ModalLealtad({
                 setTelefono("");
                 setCorreo("");
                 setNotas("");
+                setLimiteCredito("");
                 setError("");
                 setVista("nuevo");
               }}
@@ -287,6 +316,11 @@ export default function ModalLealtad({
                 setTelefono(seleccionado.telefono ?? "");
                 setCorreo(seleccionado.correo ?? "");
                 setNotas(seleccionado.notas ?? "");
+                setLimiteCredito(
+                  seleccionado.limite_credito_centavos > 0
+                    ? centavosATexto(seleccionado.limite_credito_centavos)
+                    : ""
+                );
                 setError("");
                 setVista("editar");
               }}
@@ -403,6 +437,35 @@ export default function ModalLealtad({
                   Ese correo no parece válido; puedes guardar sin correo y corregirlo después.
                 </Txt>
               )}
+
+              {/* Crédito: sección propia, separada de los datos de contacto —
+                  es un beneficio distinto (fiado), no un dato de identidad. */}
+              <View
+                style={{
+                  borderTopWidth: 1,
+                  borderTopColor: T.borde,
+                  paddingTop: T.esps.lg,
+                  marginTop: T.esps.xs,
+                  marginBottom: T.esps.lg,
+                }}
+              >
+                <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
+                  Límite de crédito (opcional)
+                </Txt>
+                <TextInput
+                  style={estiloInput}
+                  value={limiteCredito}
+                  onChangeText={setLimiteCredito}
+                  placeholder="Déjalo vacío para no fiarle"
+                  placeholderTextColor={T.textoTenue}
+                  keyboardType="decimal-pad"
+                />
+                <Txt escala="pie" tono="tenue" estilo={{ marginTop: T.esps.xs }}>
+                  Hasta cuánto puede deber antes de que se te avise al cobrarle a crédito. Nunca
+                  bloquea la venta — la decisión siempre es tuya o del cajero en el momento.
+                </Txt>
+              </View>
+
               {vista === "editar" && (
                 <>
                   <Txt escala="micro" tono="suave" fuerte mayus estilo={{ marginBottom: T.esps.xs }}>
@@ -491,6 +554,69 @@ export default function ModalLealtad({
               <Txt escala="pie" tono="tenue" estilo={{ textAlign: "center", marginTop: T.esps.sm }}>
                 Un regalito por pasar a saludar: una vez al día por cliente.
               </Txt>
+
+              {/* Crédito: solo si hay algo real que mostrar — ni límite
+                  asignado ni deuda viva. La tarjeta de quien nunca usa
+                  fiado se queda limpia, no con una sección vacía. */}
+              {(seleccionado.limite_credito_centavos > 0 || seleccionado.saldo_centavos > 0) && (
+                <View
+                  style={{
+                    backgroundColor: T.superficie,
+                    borderWidth: 1,
+                    borderColor:
+                      seleccionado.limite_credito_centavos > 0 &&
+                      seleccionado.saldo_centavos > seleccionado.limite_credito_centavos
+                        ? T.peligro
+                        : T.borde,
+                    borderRadius: T.radioGrande,
+                    padding: T.esps.lg,
+                    marginTop: T.esps.xl,
+                  }}
+                >
+                  <Txt escala="micro" tono="suave" fuerte mayus>
+                    Crédito
+                  </Txt>
+                  <View
+                    style={{
+                      flexDirection: "row",
+                      justifyContent: "space-between",
+                      alignItems: "flex-end",
+                      marginTop: T.esps.sm,
+                    }}
+                  >
+                    <View>
+                      <Txt escala="pie" tono="suave" estilo={{ marginBottom: 2 }}>
+                        Debe
+                      </Txt>
+                      <Monto
+                        texto={pesos(seleccionado.saldo_centavos)}
+                        escala="titulo"
+                        tono={seleccionado.saldo_centavos > 0 ? "peligro" : "suave"}
+                      />
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Txt escala="pie" tono="suave" estilo={{ marginBottom: 2 }}>
+                        Límite
+                      </Txt>
+                      <Monto
+                        texto={
+                          seleccionado.limite_credito_centavos > 0
+                            ? pesos(seleccionado.limite_credito_centavos)
+                            : "Sin límite"
+                        }
+                        escala="titulo"
+                        tono="suave"
+                      />
+                    </View>
+                  </View>
+                  {seleccionado.limite_credito_centavos > 0 &&
+                    seleccionado.saldo_centavos > seleccionado.limite_credito_centavos && (
+                      <Txt escala="pie" tono="peligro" estilo={{ marginTop: T.esps.sm }}>
+                        Está sobre su límite. Esto es solo un aviso — tú decides si le sigues fiando.
+                      </Txt>
+                    )}
+                </View>
+              )}
 
               {/* Historial */}
               <View style={{ marginTop: T.esps.xl }}>

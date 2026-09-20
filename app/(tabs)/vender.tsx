@@ -90,18 +90,30 @@ import {
   Modal,
   ScrollView,
   Switch,
-  KeyboardAvoidingView,
   PanResponder,
   Platform,
   BackHandler,
+  Text,
   type ViewStyle,
+  type TextStyle,
+  type StyleProp,
 } from "react-native";
+// Ver el porqué en ui.tsx: el KeyboardAvoidingView de React Native encoge el
+// contenedor pero no desplaza hasta el campo enfocado, y en una pantalla
+// completa como ésta el cajero tenía que arrastrar a mano para ver lo que
+// había debajo del importe.
+import {
+  KeyboardAwareScrollView,
+  KeyboardAvoidingView,
+} from "react-native-keyboard-controller";
 import { SafeAreaView } from "react-native-safe-area-context";
+import BotonYaxo from "@/src/componentes/BotonYaxo";
 import { useFocusEffect } from "expo-router";
 import {
   Turno,
   ItemCarrito,
   MetodoPago,
+  PagoEntrada,
   ResultadoCobro,
   turnoActivo,
   abrirTurno,
@@ -308,20 +320,54 @@ export default function VenderScreen() {
 
   const total = carrito.reduce((s, i) => s + Math.round(i.precio_centavos * i.cantidad), 0);
   const articulos = carrito.reduce((s, i) => s + i.cantidad, 0);
+  // Qué lleva el ticket, en una sola línea. Se muestran los dos primeros y
+  // el resto se cuenta ("+3"), porque el objetivo es reconocer de un
+  // vistazo, no leer el detalle: para eso está abrir el ticket.
+  const resumenTicket = useMemo(() => {
+    if (carrito.length === 0) return "";
+    // Se corta por LONGITUD, no por número de productos. Limitarlo a "los
+    // dos primeros" funcionaba con nombres cortos, pero con dos como
+    // "6 Bote Bud Light" la línea se pasaba de ancho y se veía cortada a la
+    // mitad — peor que no mostrar nada, porque parece un fallo.
+    const MAX = 34;
+    const partes: string[] = [];
+    let largo = 0;
+    for (const i of carrito) {
+      const cant = i.cantidad % 1 === 0 ? i.cantidad : Number(i.cantidad.toFixed(2));
+      const txt = cant > 1 ? `${cant}× ${i.nombre}` : i.nombre;
+      if (partes.length > 0 && largo + txt.length > MAX) break;
+      partes.push(txt);
+      largo += txt.length + 3; // " · "
+    }
+    const restantes = carrito.length - partes.length;
+    if (restantes > 0) partes.push(`+${restantes}`);
+    return partes.join(" · ");
+  }, [carrito]);
   const cantidadDe = (id: string) => carrito.find((i) => i.producto_id === id)?.cantidad ?? 0;
 
   // Productos visibles según la selección y la búsqueda.
   const q = busqueda.trim().toLowerCase();
+  const coincide = (p: ProductoLista) =>
+    p.nombre.toLowerCase().includes(q) ||
+    (p.codigo_barras ?? "").toLowerCase().includes(q);
+
   const visibles = productos.filter((p) => {
-    if (buscando && q) {
-      return (
-        p.nombre.toLowerCase().includes(q) ||
-        (p.codigo_barras ?? "").toLowerCase().includes(q)
-      );
-    }
-    if (seleccion === "__todos__") return true;
-    if (seleccion === "__sin__") return p.categoria_id === null;
-    return p.categoria_id === seleccion;
+    // Búsqueda GLOBAL: la lupa desde la pantalla de departamentos. Ignora la
+    // selección a propósito — se busca en todo el catálogo. Sin cambios.
+    if (buscando && q) return coincide(p);
+
+    let enSeleccion: boolean;
+    if (seleccion === "__todos__") enSeleccion = true;
+    else if (seleccion === "__sin__") enSeleccion = p.categoria_id === null;
+    else enSeleccion = p.categoria_id === seleccion;
+    if (!enSeleccion) return false;
+
+    // Búsqueda DENTRO de la lista abierta. Es lo que hace útil tener el campo
+    // siempre a la vista: con 216 productos, desplazarse hasta encontrar uno
+    // no es opción, y la lupa escondida en la cabecera no se ve a simple
+    // vista. Aquí sí se filtra respetando el departamento en el que estás.
+    if (q) return coincide(p);
+    return true;
   });
 
   const sinDepto = conteos.get("__sin__") ?? 0;
@@ -471,6 +517,43 @@ export default function VenderScreen() {
     }
   }
 
+  // ⚠️ ESTE useMemo VA AQUÍ, ANTES DE CUALQUIER `return` ANTICIPADO.
+  //
+  // Lo puse por error más abajo, junto a `cols`, que está DESPUÉS de los
+  // returns de "turno === undefined" y "!turno". Resultado: en los renders
+  // que salían por ahí el hook no se ejecutaba, y React reventaba con
+  // "Rendered more hooks than during the previous render". Las reglas de
+  // hooks exigen que TODOS se llamen siempre, en el mismo orden.
+  // Agrupación por departamento — SOLO en la vista lista, y solo cuando se
+  // está viendo el catálogo entero sin filtrar.
+  //
+  // Por qué solo ahí: dentro de un departamento el encabezado sería el mismo
+  // en todas las filas (ruido), y en una búsqueda el orden lo manda la
+  // relevancia, no la categoría. Y solo en lista porque en cuadrícula los
+  // encabezados romperían las columnas.
+  //
+  // No pide nada nuevo a la base: `categoria_nombre` ya viaja en cada
+  // producto (ver ProductoLista en inventario.ts).
+  type FilaSeparador = { _sep: true; id: string; titulo: string; n: number };
+  const datosLista = useMemo<(ProductoLista | FilaSeparador)[]>(() => {
+    if (vista !== "lista") return visibles;
+    const salida: (ProductoLista | FilaSeparador)[] = [];
+    let actual: string | null = null;
+    let iSep = -1;
+    for (const p of visibles) {
+      const dep = p.categoria_nombre ?? "Sin departamento";
+      if (dep !== actual) {
+        actual = dep;
+        salida.push({ _sep: true, id: `sep-${dep}-${salida.length}`, titulo: dep, n: 0 });
+        iSep = salida.length - 1;
+      }
+      salida.push(p);
+      const sep = salida[iSep] as FilaSeparador;
+      sep.n += 1;
+    }
+    return salida;
+  }, [vista, visibles]);
+
   if (turno === undefined) return <SafeAreaView style={est.raiz} />;
 
   // ---------------- Sin turno ----------------
@@ -486,13 +569,11 @@ export default function VenderScreen() {
             empezar sin fondo.
           </Txt>
           <Banner texto={error} tipo="error" />
-          <TextInput
-            style={[estiloInput, est.montoInput]}
-            value={fondo}
-            onChangeText={setFondo}
-            keyboardType="decimal-pad"
-            placeholder="$ 0.00"
-            placeholderTextColor={T.textoTenue}
+          <CampoMonto
+            estilo={[estiloInput, est.montoInput]}
+            valor={fondo}
+            onCambio={setFondo}
+            pista="$ 0.00"
             onSubmitEditing={abrir}
           />
           <View style={est.rapidos}>
@@ -512,12 +593,33 @@ export default function VenderScreen() {
 
   const enDeptos = seleccion === null && !(buscando && q);
   const cols = columnasDe(vista);
+
   const hayTicket = carrito.length > 0;
 
   return (
     <SafeAreaView style={est.raiz} edges={["top"]}>
-      {/* Cabecera: atrás (si estás dentro), título, escáner, lupa.
-          Sin wordmark: recupera una línea de alto en cada pantalla. */}
+      {/* EL TECLADO TAPABA LA LISTA DE PRODUCTOS
+          ------------------------------------------------------------------
+          El buscador vive en la cabecera, arriba, así que se veía siempre —
+          pero al escribir, los resultados quedaban DEBAJO del teclado y no
+          había forma de llegar a ellos sin cerrarlo. Que es justo lo que se
+          hace al buscar: escribir y mirar lo que sale.
+
+          Envuelve cabecera + lista, no los modales: cada uno trae su propio
+          <Hoja>, y anidar dos capas que empujan haría que se sumaran. */}
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior="padding">
+      {/* Cabecera: atrás (si estás dentro), título, Yaxo, escáner, lupa.
+          Sin wordmark: recupera una línea de alto en cada pantalla.
+
+          YAXO VA PRIMERO DE LA FILA DE ICONOS, igual que en Inventario: el
+          escáner y la lupa son las herramientas de esta pantalla y se quedan
+          pegadas al borde, donde el pulgar ya las busca sin mirar. Mover una
+          herramienta que se toca cien veces al día para hacerle sitio al
+          asistente sería el peor intercambio posible.
+
+          QUE ESTÉ AQUÍ NO CONTRADICE "NUNCA INTERRUMPE UNA VENTA": esa regla
+          es sobre que Yaxo APAREZCA solo. Un botón quieto en la cabecera no
+          interrumpe nada, y a Vender se entra por voluntad propia. */}
       <View style={est.cabecera}>
         {!enDeptos && (
           <Pressable
@@ -545,6 +647,9 @@ export default function VenderScreen() {
                     : catActual?.nombre ?? "Productos"}
           </Txt>
         </View>
+        <View style={est.iconBtn}>
+          <BotonYaxo desde="vender" size={26} />
+        </View>
         <Pressable
           style={est.iconBtn}
           accessibilityLabel="Escanear código"
@@ -570,18 +675,21 @@ export default function VenderScreen() {
       </View>
 
       {/* Buscador */}
-      {buscando && (
+      {(buscando || !enDeptos) && (
         <View style={{ paddingHorizontal: T.esp, paddingBottom: T.esps.sm }}>
           <TextInput
             style={est.buscador}
-            placeholder="Escanea un código o escribe…"
+            placeholder={buscando ? "Escanea un código o escribe…" : "Buscar en esta lista…"}
             placeholderTextColor={T.textoTenue}
             value={busqueda}
             onChangeText={setBusqueda}
             onSubmitEditing={enviarBusqueda}
             autoCapitalize="none"
             autoCorrect={false}
-            autoFocus
+            /* autoFocus SOLO al abrir con la lupa. Con el campo siempre
+               visible, enfocarlo al entrar en un departamento levantaría el
+               teclado y taparía media pantalla sin que nadie lo pidiera. */
+            autoFocus={buscando}
           />
         </View>
       )}
@@ -596,7 +704,7 @@ export default function VenderScreen() {
           contentContainerStyle={[est.grid, hayTicket && est.gridConBarra]}
           columnWrapperStyle={{ gap: T.esps.md }}
           ListHeaderComponent={
-            <Pressable style={est.todoBtn} onPress={() => setSeleccion("__todos__")}>
+            <Pressable style={est.todoBtn} onPress={() => { setBusqueda(""); setSeleccion("__todos__"); }}>
               <IconoUI id="grid3" size={21} color={T.acento} />
               <View style={{ flex: 1 }}>
                 <Txt escala="cuerpo" fuerte>
@@ -621,7 +729,7 @@ export default function VenderScreen() {
             sinDepto > 0 ? (
               <Pressable
                 style={[est.todoBtn, { marginTop: T.esps.md }]}
-                onPress={() => setSeleccion("__sin__")}
+                onPress={() => { setBusqueda(""); setSeleccion("__sin__"); }}
               >
                 <IconoUI id="inventario" size={21} color={T.textoSuave} />
                 <View style={{ flex: 1 }}>
@@ -642,7 +750,13 @@ export default function VenderScreen() {
             <TarjetaDepartamento
               item={item}
               n={conteos.get(item.id) ?? 0}
-              onPress={setSeleccion}
+              /* Limpiar lo escrito al entrar a un departamento: si no, el
+                 filtro de la lista anterior seguiría aplicándose aquí y el
+                 departamento parecería medio vacío sin motivo visible. */
+              onPress={(id) => {
+                setBusqueda("");
+                setSeleccion(id);
+              }}
             />
           )}
         />
@@ -657,7 +771,7 @@ export default function VenderScreen() {
           </View>
 
           <FlatList
-            data={visibles}
+            data={datosLista}
             key={vista}
             numColumns={cols}
             keyExtractor={(p) => p.id}
@@ -677,7 +791,14 @@ export default function VenderScreen() {
               )
             }
             renderItem={({ item }) =>
-              vista === "lista" ? (
+              "_sep" in item ? (
+                <View style={est.sepDepto}>
+                  <Txt escala="micro" tono="tenue" fuerte mayus lineas={1} estilo={{ flex: 1 }}>
+                    {item.titulo}
+                  </Txt>
+                  <Monto texto={String(item.n)} escala="micro" estilo={{ color: T.textoTenue }} />
+                </View>
+              ) : vista === "lista" ? (
                 <FilaProducto
                   item={item}
                   enTicket={cantidadDe(item.id)}
@@ -706,6 +827,7 @@ export default function VenderScreen() {
         <BarraTicket
           total={total}
           articulos={articulos}
+          resumen={resumenTicket}
           cliente={reglas?.activa ? clienteTicket : null}
           mostrarCliente={Boolean(reglas?.activa)}
           onVerTicket={() => setTicketAbierto(true)}
@@ -784,6 +906,7 @@ export default function VenderScreen() {
               <Pressable
                 style={est.cantBtn}
                 onPress={() => cambiarCantidad(i.producto_id, -1)}
+                android_ripple={{ color: T.acentoBorde }}
               >
                 <Txt escala="cuerpo" fuerte>
                   −
@@ -793,6 +916,7 @@ export default function VenderScreen() {
               <Pressable
                 style={est.cantBtn}
                 onPress={() => cambiarCantidad(i.producto_id, +1)}
+                android_ripple={{ color: T.acentoBorde }}
               >
                 <Txt escala="cuerpo" fuerte>
                   +
@@ -804,6 +928,7 @@ export default function VenderScreen() {
               onPress={() => quitarLinea(i.producto_id)}
               hitSlop={8}
               accessibilityLabel={`Quitar ${i.nombre} del ticket`}
+              android_ripple={{ color: T.peligroSuave }}
             >
               <Txt escala="pie" tono="peligro" fuerte>
                 ✕
@@ -855,7 +980,7 @@ export default function VenderScreen() {
           cliente={reglas?.activa ? clienteTicket : null}
           reglas={reglas}
           onCerrar={() => setCobroAbierto(false)}
-          onCobrado={async (r, metodo, pagadoCentavos, canje) => {
+          onCobrado={async (r, canje) => {
             setCobroAbierto(false);
             // Si este ticket venía de una cotización, la cerramos como
             // "convertida". Best-effort: la venta YA está hecha, no vale la
@@ -908,7 +1033,7 @@ export default function VenderScreen() {
                 saldoPuntos: saldo,
               };
             }
-            const t = await construirTicket(r, carrito, metodo, pagadoCentavos, extrasLealtad);
+            const t = await construirTicket(r, carrito, extrasLealtad);
             setCarrito([]);
             setClienteTicket(null);
             setTicketCobrado(t);
@@ -978,6 +1103,7 @@ export default function VenderScreen() {
           </View>
         </View>
       )}
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -996,6 +1122,7 @@ export default function VenderScreen() {
 function BarraTicket({
   total,
   articulos,
+  resumen,
   cliente,
   mostrarCliente,
   onVerTicket,
@@ -1005,6 +1132,11 @@ function BarraTicket({
 }: {
   total: number;
   articulos: number;
+  /** Qué lleva el ticket, en una línea ("2× Coca-Cola · Sabritas · +2").
+   *  Antes la barra solo decía "3 artículos": para saber QUÉ había que
+   *  abrir el ticket, y el cajero abre y cierra esa hoja decenas de veces
+   *  al día solo para comprobar que no metió algo de más. */
+  resumen: string;
   cliente: Cliente | null;
   mostrarCliente: boolean;
   onVerTicket: () => void;
@@ -1050,7 +1182,7 @@ function BarraTicket({
         paddingTop: T.esps.sm,
         paddingHorizontal: T.esp,
         paddingBottom: Platform.OS === "ios" ? T.esps.lg : T.esps.md,
-        shadowColor: "#000",
+        shadowColor: T.esClaro ? T.bordeFuerte : "#000",
         shadowOpacity: 0.2,
         shadowRadius: 16,
         shadowOffset: { width: 0, height: -6 },
@@ -1076,6 +1208,11 @@ function BarraTicket({
             {articulos} {articulos === 1 ? "artículo" : "artículos"}
           </Txt>
           <Monto texto={pesos(total)} escala="titulo" />
+          {resumen ? (
+            <Txt escala="micro" tono="tenue" lineas={1}>
+              {resumen}
+            </Txt>
+          ) : null}
         </Pressable>
 
         {mostrarCliente &&
@@ -1089,7 +1226,7 @@ function BarraTicket({
                 borderRadius: T.radioChico,
                 paddingHorizontal: T.esps.md,
                 paddingVertical: T.esps.sm,
-                maxWidth: 130,
+                maxWidth: 116,
               }}
             >
               <Pressable onPress={onCliente} style={{ flexShrink: 1 }}>
@@ -1105,24 +1242,29 @@ function BarraTicket({
               </Pressable>
             </View>
           ) : (
+            /* Sin cliente ligado: solo el icono, sin la palabra debajo.
+               Cliente y Cobrar se veían como dos botones hermanos del mismo
+               peso, y no lo son: ligar un cliente es opcional y ocasional;
+               cobrar es LA acción de la pantalla. Estrechar este libera
+               además el ancho que necesitaba el resumen del ticket, que con
+               nombres largos se cortaba a la mitad.
+               El área tocable se mantiene por encima del mínimo accesible
+               (44) gracias al minHeight y al hitSlop: se ve más discreto,
+               pero no es más difícil de acertar. */
             <Pressable
               onPress={onCliente}
-              hitSlop={6}
+              hitSlop={10}
               accessibilityLabel="Ligar cliente"
               style={{
                 alignItems: "center",
                 justifyContent: "center",
-                minWidth: 52,
+                width: 46,
                 minHeight: 48,
                 borderRadius: T.radioChico,
                 backgroundColor: T.superficie2,
-                gap: 2,
               }}
             >
-              <IconoUI id="persona" size={19} color={T.textoSuave} grosor={1.9} />
-              <Txt escala="micro" tono="suave">
-                Cliente
-              </Txt>
+              <IconoUI id="persona" size={20} color={T.textoSuave} grosor={1.9} />
             </Pressable>
           ))}
 
@@ -1186,22 +1328,52 @@ function TarjetaDepartamento({
 }) {
   const { tema: T } = useTema();
   const est = useMemo(() => crearEstilos(T), [T]);
-  const c = item.color ?? T.acento;
+  // REDISEÑO — tres cambios, cada uno por un motivo concreto:
+  //
+  // 1. Un solo color (el acento), no uno por departamento. El color por
+  //    categoría no codificaba nada que el cajero necesite: nadie busca
+  //    "lo verde", busca "cerveza". Nueve tintes pastel distintos rompían
+  //    la paleta y hacían que la pantalla se leyera como una plantilla.
+  //    Si algún día algo va en color aquí, que sea el ESTADO (por
+  //    acabarse), no la categoría.
+  //
+  // 2. Sin cubo por defecto. `item.icono ?? "caja"` hacía que TODOS los
+  //    departamentos sin icono mostraran el mismo cubo genérico — el
+  //    síntoma más visible de "plantilla". Un icono equivocado cuesta más
+  //    que ninguno: sin icono, manda el nombre, que es lo que de verdad
+  //    se lee. (Los 16 iconos de categoría ya existen en iconos.tsx; el
+  //    problema era el respaldo, no la falta de dibujos.)
+  //
+  // 3. El contador deja de ser protagonista. "0 productos" en rojo
+  //    llamaba la atención sobre un departamento vacío, que es justo lo
+  //    que NO hay que tocar. Ahora es un dato tenue a la derecha del
+  //    nombre, y desaparece cuando está vacío.
+  const tieneIcono = !!item.icono;
   return (
     <Pressable
-      android_ripple={{ color: c + "40" }}
+      android_ripple={{ color: T.acentoSuave }}
       style={({ pressed }) => [
         est.deptoCard,
-        { borderColor: c + "66", backgroundColor: c + "14" },
-        pressed && { transform: [{ scale: 0.97 }], backgroundColor: c + "26" },
+        pressed && { backgroundColor: T.acentoSuave },
       ]}
       onPress={() => onPress(item.id)}
     >
-      <Icono id={item.icono ?? "caja"} size={38} color={c} />
+      {/* Los huecos del icono y del contador se reservan SIEMPRE, tenga o no
+          contenido. Sin esto convivían cuatro composiciones distintas en la
+          misma rejilla (con icono y sin contador, sin icono y con contador…)
+          y cada tarjeta colocaba su nombre a una altura diferente: se leía
+          como desalineado, no como variado. */}
+      <View style={est.deptoIconoHueco}>
+        {tieneIcono ? <Icono id={item.icono} size={28} color={T.acento} /> : null}
+      </View>
       <Txt escala="cuerpo" fuerte lineas={2} estilo={est.deptoNombre}>
         {item.nombre}
       </Txt>
-      <Monto texto={`${n} productos`} escala="pie" estilo={{ color: c }} />
+      <View style={est.deptoCuentaHueco}>
+        {n > 0 ? (
+          <Monto texto={String(n)} escala="pie" estilo={est.deptoCuenta} />
+        ) : null}
+      </View>
     </Pressable>
   );
 }
@@ -1239,7 +1411,12 @@ function TarjetaProductoBase({
             <Monto texto={String(enTicket)} escala="pie" estilo={{ color: T.acentoTexto }} />
           </View>
           {/* Restar / quitar (izquierda) */}
-          <Pressable style={est.cardQuitar} onPress={() => onQuitar(item.id, -1)} hitSlop={10}>
+          <Pressable
+            style={est.cardQuitar}
+            onPress={() => onQuitar(item.id, -1)}
+            hitSlop={10}
+            android_ripple={{ color: T.acentoBorde }}
+          >
             <Txt escala="cuerpo" fuerte>
               −
             </Txt>
@@ -1306,7 +1483,12 @@ function FilaProductoBase({
       </View>
       {enTicket > 0 && (
         <>
-          <Pressable style={est.filaQuitar} onPress={() => onQuitar(item.id, -1)} hitSlop={8}>
+          <Pressable
+            style={est.filaQuitar}
+            onPress={() => onQuitar(item.id, -1)}
+            hitSlop={8}
+            android_ripple={{ color: T.acentoBorde }}
+          >
             <Txt escala="cuerpo" fuerte>
               −
             </Txt>
@@ -1322,6 +1504,19 @@ function FilaProductoBase({
 const FilaProducto = memo(FilaProductoBase);
 
 // ---------------------------------------------------------------------------
+type FilaMixta = { id: string; metodo: MetodoPago; monto: string };
+
+const METODOS_TXT: Record<MetodoPago, string> = {
+  efectivo: "Efectivo",
+  tarjeta: "Tarjeta",
+  transferencia: "Transferencia",
+  credito: "Crédito",
+};
+
+function nuevaFilaMixta(metodo: MetodoPago): FilaMixta {
+  return { id: Math.random().toString(36).slice(2), metodo, monto: "" };
+}
+
 function ModalCobro({
   total,
   items,
@@ -1337,8 +1532,6 @@ function ModalCobro({
   onCerrar: () => void;
   onCobrado: (
     r: ResultadoCobro,
-    metodo: MetodoPago,
-    pagadoCentavos: number,
     canje?: { puntosUsados: number; descuentoCentavos: number }
   ) => void;
 }) {
@@ -1349,6 +1542,12 @@ function ModalCobro({
   const [recibido, setRecibido] = useState("");
   const [error, setError] = useState("");
   const [cobrando, setCobrando] = useState(false);
+
+  // Pago mixto: apagado por defecto — el caso de siempre (un solo método,
+  // un toque) no cambia en NADA. Se activa a propósito, como el canje de
+  // puntos: nunca aparece encima de lo simple, siempre al lado.
+  const [mixto, setMixto] = useState(false);
+  const [filas, setFilas] = useState<FilaMixta[]>([]);
 
   // Crédito: exige cliente (elegido ANTES de abrir este modal, mismo
   // patrón que el canje de puntos). El límite AVISA, nunca bloquea — la
@@ -1395,57 +1594,160 @@ function ModalCobro({
 
   const totalFinal = total - canje.descuentoCentavos;
 
+  function activarMixto() {
+    setMixto(true);
+    setFilas([nuevaFilaMixta("efectivo"), nuevaFilaMixta("tarjeta")]);
+  }
+  function desactivarMixto() {
+    setMixto(false);
+    setFilas([]);
+  }
+  function agregarFila() {
+    if (filas.length >= 4) return;
+    const usados = new Set(filas.map((f) => f.metodo));
+    const disponible =
+      (["efectivo", "tarjeta", "transferencia", "credito"] as MetodoPago[]).find(
+        (m) => !usados.has(m)
+      ) ?? "efectivo";
+    setFilas((s) => [...s, nuevaFilaMixta(disponible)]);
+  }
+  function quitarFila(id: string) {
+    setFilas((s) => (s.length > 1 ? s.filter((f) => f.id !== id) : s));
+  }
+  function cambiarMetodoFila(id: string, m: MetodoPago) {
+    setFilas((s) => s.map((f) => (f.id === id ? { ...f, metodo: m } : f)));
+  }
+  function cambiarMontoFila(id: string, v: string) {
+    setFilas((s) => s.map((f) => (f.id === id ? { ...f, monto: v } : f)));
+  }
+
+  const filasC = filas.map((f) => ({
+    ...f,
+    centavos: f.monto.trim() === "" ? 0 : aCentavos(f.monto),
+  }));
+
+  const montoCredito = mixto
+    ? filasC.filter((f) => f.metodo === "credito").reduce((s, f) => s + f.centavos, 0)
+    : metodo === "credito"
+    ? totalFinal
+    : 0;
+
   useEffect(() => {
-    if (metodo !== "credito" || !cliente) {
+    if (montoCredito <= 0 || !cliente) {
       setLimiteInfo(null);
       return;
     }
     let vivo = true;
-    verificarLimite(cliente.id, totalFinal).then((r) => {
+    verificarLimite(cliente.id, montoCredito).then((r) => {
       if (vivo) setLimiteInfo(r);
     });
     return () => {
       vivo = false;
     };
-  }, [metodo, cliente, totalFinal]);
+  }, [montoCredito, cliente]);
+
+  // Vista previa del reparto.
+  //
+  // ⚠️ EL ORDEN DE LAS PASADAS ES LA REGLA, NO UN DETALLE.
+  //
+  // Esto recorría `filasC` en el orden en que el cajero capturó los pagos, y
+  // por eso decía cosas distintas de las que acababa haciendo el cobro. Con un
+  // total de $200 y el cajero capturando "efectivo $100 + tarjeta $200":
+  //
+  //   por captura : efectivo aplica 100, tarjeta aplica 100 -> "Cubre el total"
+  //   real        : tarjeta aplica 200, efectivo aplica 0   -> "Cambio $100"
+  //
+  // El ticket ya salía bien porque lo calcula cobrar(); solo mentía la
+  // pantalla de cobro, que es justo donde el cajero decide cuánto dinero
+  // devolver. El comentario anterior afirmaba "MISMO algoritmo que cobrar()"
+  // y había dejado de serlo cuando se corrigió venta.ts.
+  //
+  // Ahora replica sus TRES PASADAS exactas (venta.ts, que a su vez calca
+  // ventas.rs del PC):
+  //   1. Crédito: cubre su parte, nunca hay vuelto sobre fiado.
+  //   2. Tarjeta y transferencia: no pueden dar cambio, se aplican completas
+  //      mientras quede total por cubrir.
+  //   3. Efectivo AL FINAL: el único que absorbe el sobrante y lo devuelve.
+  //
+  // Sigue siendo una previsualización: la verdad final la calcula cobrar().
+  // Pero ahora las dos dicen lo mismo.
+  const previa = useMemo(() => {
+    if (!mixto) return null;
+    let porCubrir = Math.max(0, totalFinal - montoCredito);
+
+    // Pasada 2: todo lo que NO es efectivo ni crédito.
+    for (const f of filasC) {
+      if (f.metodo === "credito" || f.metodo === "efectivo") continue;
+      porCubrir -= Math.min(f.centavos, porCubrir);
+    }
+
+    // Pasada 3: el efectivo, con lo que quede. Lo que sobre es el cambio.
+    let cambioPrevia = 0;
+    for (const f of filasC) {
+      if (f.metodo !== "efectivo") continue;
+      const aplicado = Math.min(f.centavos, porCubrir);
+      porCubrir -= aplicado;
+      cambioPrevia += Math.max(f.centavos - aplicado, 0);
+    }
+
+    const capturado = filasC.reduce((s, f) => s + f.centavos, 0);
+    return {
+      falta: Math.max(0, totalFinal - capturado),
+      cambio: cambioPrevia,
+      cubre: capturado >= totalFinal,
+    };
+  }, [mixto, filasC, totalFinal, montoCredito]);
 
   const recibidoC = recibido.trim() === "" ? totalFinal : aCentavos(recibido);
-  const cambio = metodo === "efectivo" ? recibidoC - totalFinal : 0;
+  const cambio = !mixto && metodo === "efectivo" ? recibidoC - totalFinal : 0;
 
   async function confirmar() {
     setError("");
     setCobrando(true);
     try {
-      const r = await cobrar(
-        items,
-        metodo,
-        metodo === "efectivo" ? recibidoC : totalFinal,
-        {
-          clienteId: cliente?.id,
-          descuentoCentavos: canje.descuentoCentavos,
-        }
-      );
-      onCobrado(
-        r,
-        metodo,
-        metodo === "efectivo" ? recibidoC : totalFinal,
-        canje.descuentoCentavos > 0 ? canje : undefined
-      );
+      const pagos: PagoEntrada[] = mixto
+        ? filasC
+            .filter((f) => f.centavos > 0)
+            .map((f) => ({
+              metodo: f.metodo,
+              monto_centavos: f.centavos,
+              recibido_centavos: f.metodo === "efectivo" ? f.centavos : undefined,
+            }))
+        : [
+            {
+              metodo,
+              monto_centavos: metodo === "efectivo" ? recibidoC : totalFinal,
+              recibido_centavos: metodo === "efectivo" ? recibidoC : undefined,
+            },
+          ];
+      const r = await cobrar(items, pagos, {
+        clienteId: cliente?.id,
+        descuentoCentavos: canje.descuentoCentavos,
+      });
+      onCobrado(r, canje.descuentoCentavos > 0 ? canje : undefined);
     } catch (e: any) {
       setError(e?.message ?? String(e));
       setCobrando(false);
     }
   }
 
+  const deshabilitarConfirmar = mixto
+    ? !previa?.cubre || (montoCredito > 0 && !cliente)
+    : (metodo === "efectivo" && cambio < 0) || (metodo === "credito" && !cliente);
+
   return (
     <Modal visible animationType="slide" onRequestClose={onCerrar}>
       <SafeAreaView style={est.raiz}>
-        <KeyboardAvoidingView
-          style={{ flex: 1 }}
-          behavior={Platform.OS === "ios" ? "padding" : undefined}
-        >
+        <View style={{ flex: 1 }}>
+          {/* La cabecera queda FUERA del scroll: "Cancelar" y el título tienen
+              que seguir alcanzables con el teclado abierto. */}
           <CabeceraModal titulo="Cobrar" onIzquierda={onCerrar} />
-          <ScrollView
+          {/* Antes: KeyboardAvoidingView + ScrollView. El importe se veía, pero
+              todo lo de debajo —"+ Pago mixto", el reparto, el botón de
+              confirmar— quedaba bajo el teclado y había que arrastrar a mano.
+              En la pantalla del dinero eso no vale. */}
+          <KeyboardAwareScrollView
+            bottomOffset={16}
             contentContainerStyle={{ padding: T.esp, paddingBottom: T.esps.xxl }}
             keyboardShouldPersistTaps="handled"
           >
@@ -1520,109 +1822,325 @@ function ModalCobro({
               </View>
             )}
 
-            <View style={est.segmento}>
-              {(["efectivo", "tarjeta", "credito"] as MetodoPago[]).map((m) => {
-                const bloqueado = m === "credito" && !cliente;
-                return (
-                  <Pressable
-                    key={m}
-                    onPress={() => !bloqueado && setMetodo(m)}
-                    disabled={bloqueado}
-                    style={[
-                      est.segBtn,
-                      metodo === m && { backgroundColor: T.acentoRelleno },
-                      bloqueado && { opacity: 0.4 },
-                    ]}
+            {!mixto ? (
+              <>
+                <View style={est.segmento}>
+                  {(["efectivo", "tarjeta", "transferencia", "credito"] as MetodoPago[]).map((m) => {
+                    const bloqueado = m === "credito" && !cliente;
+                    return (
+                      <Pressable
+                        key={m}
+                        onPress={() => !bloqueado && setMetodo(m)}
+                        disabled={bloqueado}
+                        style={[
+                          est.segBtn,
+                          metodo === m && { backgroundColor: T.acentoRelleno },
+                          bloqueado && { opacity: 0.4 },
+                        ]}
+                      >
+                        <Txt
+                          escala="pie"
+                          fuerte={metodo === m}
+                          tono="suave"
+                          estilo={metodo === m ? { color: T.acentoTexto } : undefined}
+                        >
+                          {METODOS_TXT[m]}
+                        </Txt>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {metodo === "credito" && !cliente && (
+                  <Txt escala="micro" tono="tenue" estilo={{ marginTop: -T.esps.sm, marginBottom: T.esps.md }}>
+                    Elige un cliente antes de vender a crédito.
+                  </Txt>
+                )}
+                {metodo === "credito" && cliente && limiteInfo?.excede && (
+                  <View
+                    style={{
+                      backgroundColor: T.peligroSuave, borderWidth: 1, borderColor: T.peligro,
+                      borderRadius: T.radio, padding: T.esps.md, marginTop: -T.esps.sm, marginBottom: T.esps.md,
+                    }}
                   >
-                    <Txt
-                      escala="cuerpo"
-                      fuerte={metodo === m}
-                      tono="suave"
-                      estilo={metodo === m ? { color: T.acentoTexto } : undefined}
-                    >
-                      {m === "efectivo" ? "Efectivo" : m === "tarjeta" ? "Tarjeta" : "Crédito"}
+                    <Txt escala="pie" tono="peligro" fuerte>
+                      Esta venta deja a {cliente.nombre} sobre su límite de {pesos(limiteInfo.limite)}
+                      {" "}(debe {pesos(limiteInfo.saldo)} ahora). Tú decides si aun así se le vende.
+                    </Txt>
+                  </View>
+                )}
+
+                {metodo === "efectivo" && (
+                  <>
+                    <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.sm }}>
+                      ¿Con cuánto paga? Vacío = pago exacto.
+                    </Txt>
+                    <CampoMonto
+                      estilo={[estiloInput, est.montoInput]}
+                      valor={recibido}
+                      onCambio={setRecibido}
+                      pista={pesos(totalFinal)}
+                      autoFocus
+                    />
+                    <View style={est.rapidos}>
+                      {sugerenciasBillete(totalFinal).map((m) => (
+                        <Pressable key={m} style={est.rapido} onPress={() => setRecibido(String(m))}>
+                          <Monto texto={`$${m}`} escala="pie" tono="suave" />
+                        </Pressable>
+                      ))}
+                    </View>
+                    {/* El cambio: lo segundo que el cajero dice en voz alta.
+                        Con pago exacto no se muestra "$0.00" en grande —
+                        sería ruido que apaga el aviso real cuando sí hay
+                        cambio (mismo criterio ya usado en el ticket). */}
+                    {cambio !== 0 && (
+                      <View
+                        style={[
+                          est.cambioCaja,
+                          cambio < 0 && { borderColor: T.peligro, backgroundColor: T.peligroSuave },
+                        ]}
+                      >
+                        <Txt escala="micro" tono="suave" fuerte mayus>
+                          {cambio < 0 ? "Falta" : "Cambio"}
+                        </Txt>
+                        <Monto
+                          texto={pesos(Math.abs(cambio))}
+                          escala="titulo"
+                          tono={cambio < 0 ? "peligro" : "acento"}
+                        />
+                      </View>
+                    )}
+                  </>
+                )}
+
+                <Pressable onPress={activarMixto} style={est.mixtoLink} hitSlop={8}>
+                  <Txt escala="pie" tono="acento" fuerte>
+                    + Pago mixto (más de un método)
+                  </Txt>
+                </Pressable>
+              </>
+            ) : (
+              <>
+                <View style={est.mixtoCabecera}>
+                  <Txt escala="pie" fuerte>
+                    Pago mixto
+                  </Txt>
+                  <Pressable onPress={desactivarMixto} hitSlop={8}>
+                    <Txt escala="pie" tono="tenue">
+                      Un solo método
                     </Txt>
                   </Pressable>
-                );
-              })}
-            </View>
-            {metodo === "credito" && !cliente && (
-              <Txt escala="micro" tono="tenue" estilo={{ marginTop: -T.esps.sm, marginBottom: T.esps.md }}>
-                Elige un cliente antes de vender a crédito.
-              </Txt>
-            )}
-            {metodo === "credito" && cliente && limiteInfo?.excede && (
-              <View
-                style={{
-                  backgroundColor: T.peligroSuave, borderWidth: 1, borderColor: T.peligro,
-                  borderRadius: T.radio, padding: T.esps.md, marginTop: -T.esps.sm, marginBottom: T.esps.md,
-                }}
-              >
-                <Txt escala="pie" tono="peligro" fuerte>
-                  Esta venta deja a {cliente.nombre} sobre su límite de {pesos(limiteInfo.limite)}
-                  {" "}(debe {pesos(limiteInfo.saldo)} ahora). Tú decides si aun así se le vende.
-                </Txt>
-              </View>
-            )}
-
-            {metodo === "efectivo" && (
-              <>
-                <Txt escala="pie" tono="suave" estilo={{ marginBottom: T.esps.sm }}>
-                  ¿Con cuánto paga? Vacío = pago exacto.
-                </Txt>
-                <TextInput
-                  style={[estiloInput, est.montoInput]}
-                  value={recibido}
-                  onChangeText={setRecibido}
-                  keyboardType="decimal-pad"
-                  placeholder={pesos(totalFinal)}
-                  placeholderTextColor={T.textoTenue}
-                  autoFocus
-                />
-                <View style={est.rapidos}>
-                  {sugerenciasBillete(totalFinal).map((m) => (
-                    <Pressable key={m} style={est.rapido} onPress={() => setRecibido(String(m))}>
-                      <Monto texto={`$${m}`} escala="pie" tono="suave" />
-                    </Pressable>
-                  ))}
                 </View>
-                {/* El cambio: lo segundo que el cajero dice en voz alta. */}
+
+                {filasC.map((f) => (
+                  <View key={f.id} style={est.filaMixta}>
+                    <View style={est.filaMixtaMetodo}>
+                      {(["efectivo", "tarjeta", "transferencia", "credito"] as MetodoPago[]).map((m) => {
+                        const bloqueado = m === "credito" && !cliente;
+                        return (
+                          <Pressable
+                            key={m}
+                            disabled={bloqueado}
+                            onPress={() => !bloqueado && cambiarMetodoFila(f.id, m)}
+                            style={[
+                              est.chipMetodo,
+                              f.metodo === m && { backgroundColor: T.acentoRelleno },
+                              bloqueado && { opacity: 0.35 },
+                            ]}
+                          >
+                            <Txt
+                              escala="micro"
+                              fuerte={f.metodo === m}
+                              tono="suave"
+                              estilo={f.metodo === m ? { color: T.acentoTexto } : undefined}
+                            >
+                              {METODOS_TXT[m]}
+                            </Txt>
+                          </Pressable>
+                        );
+                      })}
+                    </View>
+                    <View style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, marginTop: T.esps.xs }}>
+                      <TextInput
+                        style={[estiloInput, { flex: 1 }]}
+                        value={f.monto}
+                        onChangeText={(v) => cambiarMontoFila(f.id, v)}
+                        keyboardType="decimal-pad"
+                        placeholder="0.00"
+                        placeholderTextColor={T.textoTenue}
+                      />
+                      {filas.length > 1 && (
+                        <Pressable onPress={() => quitarFila(f.id)} hitSlop={8} style={est.quitarFila}>
+                          <Txt escala="cuerpo" tono="peligro">
+                            ×
+                          </Txt>
+                        </Pressable>
+                      )}
+                    </View>
+                    {/* Chips de importe rápido: SOLO con efectivo — con
+                        tarjeta o transferencia no significan nada (mismo
+                        criterio que ya se corrigió en la pantalla de cobro
+                        del PC: confundían más de lo que ayudaban). */}
+                    {f.metodo === "efectivo" && (
+                      <View style={[est.rapidos, { marginTop: T.esps.xs }]}>
+                        {sugerenciasBillete(Math.max(0, totalFinal - montoCredito)).map((m) => (
+                          <Pressable key={m} style={est.rapido} onPress={() => cambiarMontoFila(f.id, String(m))}>
+                            <Monto texto={`$${m}`} escala="pie" tono="suave" />
+                          </Pressable>
+                        ))}
+                      </View>
+                    )}
+                  </View>
+                ))}
+
+                {filas.length < 4 && (
+                  <Pressable onPress={agregarFila} style={est.agregarFila} hitSlop={8}>
+                    <Txt escala="pie" tono="acento" fuerte>
+                      + Agregar otro método
+                    </Txt>
+                  </Pressable>
+                )}
+
+                {montoCredito > 0 && !cliente && (
+                  <Txt escala="micro" tono="tenue" estilo={{ marginTop: T.esps.sm }}>
+                    Elige un cliente antes de usar crédito en el pago mixto.
+                  </Txt>
+                )}
+                {montoCredito > 0 && cliente && limiteInfo?.excede && (
+                  <View
+                    style={{
+                      backgroundColor: T.peligroSuave, borderWidth: 1, borderColor: T.peligro,
+                      borderRadius: T.radio, padding: T.esps.md, marginTop: T.esps.sm,
+                    }}
+                  >
+                    <Txt escala="pie" tono="peligro" fuerte>
+                      Esta venta deja a {cliente.nombre} sobre su límite de {pesos(limiteInfo.limite)}
+                      {" "}(debe {pesos(limiteInfo.saldo)} ahora). Tú decides si aun así se le vende.
+                    </Txt>
+                  </View>
+                )}
+
+                {/* Resumen en vivo: mismo lenguaje que el cambio de arriba,
+                    "falta" manda si aún no cubre, "cambio" si ya cubrió de
+                    más en efectivo, y un estado neutro si cubre exacto —
+                    sin un "$0.00" que compita por atención. */}
                 <View
                   style={[
                     est.cambioCaja,
-                    cambio < 0 && { borderColor: T.peligro, backgroundColor: T.peligroSuave },
+                    previa && !previa.cubre && { borderColor: T.peligro, backgroundColor: T.peligroSuave },
                   ]}
                 >
                   <Txt escala="micro" tono="suave" fuerte mayus>
-                    {cambio < 0 ? "Falta" : "Cambio"}
+                    {previa && !previa.cubre ? "Falta" : previa && previa.cambio > 0 ? "Cambio" : "Listo"}
                   </Txt>
-                  <Monto
-                    texto={pesos(Math.abs(cambio))}
-                    escala="titulo"
-                    tono={cambio < 0 ? "peligro" : "acento"}
-                  />
+                  {previa && (!previa.cubre || previa.cambio > 0) ? (
+                    <Monto
+                      texto={pesos(!previa.cubre ? previa.falta : previa.cambio)}
+                      escala="titulo"
+                      tono={!previa.cubre ? "peligro" : "acento"}
+                    />
+                  ) : (
+                    <Txt escala="cuerpo" tono="exito" fuerte>
+                      Cubre el total
+                    </Txt>
+                  )}
                 </View>
               </>
             )}
 
             <Boton
               titulo={
-                metodo === "efectivo"
+                mixto
+                  ? "Confirmar cobro"
+                  : metodo === "efectivo"
                   ? "Confirmar cobro"
                   : metodo === "tarjeta"
                   ? "Cobrar con tarjeta"
+                  : metodo === "transferencia"
+                  ? "Cobrar por transferencia"
                   : "Vender a crédito"
               }
               onPress={confirmar}
               cargando={cobrando}
-              deshabilitado={
-                (metodo === "efectivo" && cambio < 0) || (metodo === "credito" && !cliente)
-              }
+              deshabilitado={deshabilitarConfirmar}
             />
-          </ScrollView>
-        </KeyboardAvoidingView>
+          </KeyboardAwareScrollView>
+        </View>
       </SafeAreaView>
     </Modal>
+  );
+}
+
+/**
+ * Campo de importe centrado.
+ *
+ * ---------------------------------------------------------------------------
+ * POR QUÉ NO USA `placeholder`
+ * ---------------------------------------------------------------------------
+ * En Android, un TextInput vacío con `textAlign: "center"` y un placeholder
+ * coloca el CURSOR al final del texto del placeholder, o sea pegado al borde
+ * derecho, mientras el placeholder se ve centrado. Al escribir el primer
+ * dígito todo se recoloca y el cursor salta al centro. Nada está roto, pero
+ * es exactamente el tipo de detalle que hace que una app parezca sin terminar
+ * — y aquí ocurre en la pantalla del cobro, mirando al cliente.
+ *
+ * La solución no depende de ningún truco de la plataforma: el TextInput se
+ * queda SIN placeholder (vacío de verdad, cursor centrado desde el principio)
+ * y la pista se dibuja debajo, como una capa propia que se retira en cuanto
+ * hay texto. `pointerEvents="none"` para que no se coma los toques.
+ */
+function CampoMonto({
+  valor,
+  onCambio,
+  pista,
+  estilo,
+  autoFocus,
+  onSubmitEditing,
+}: {
+  valor: string;
+  onCambio: (v: string) => void;
+  pista: string;
+  estilo: StyleProp<TextStyle>;
+  autoFocus?: boolean;
+  onSubmitEditing?: () => void;
+}) {
+  const { tema: T } = useTema();
+  const vacio = valor.trim() === "";
+  return (
+    <View style={{ justifyContent: "center" }}>
+      <TextInput
+        style={estilo}
+        value={valor}
+        onChangeText={onCambio}
+        keyboardType="decimal-pad"
+        autoFocus={autoFocus}
+        onSubmitEditing={onSubmitEditing}
+      />
+      {vacio && (
+        <View
+          pointerEvents="none"
+          style={{
+            position: "absolute",
+            left: 0,
+            right: 0,
+            top: 0,
+            bottom: 0,
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          <Text
+            style={[
+              estilo,
+              // Sin márgenes ni alto propio: esta capa solo aporta el texto,
+              // la caja ya la define el TextInput de debajo.
+              { color: T.textoTenue, marginBottom: 0, includeFontPadding: false },
+            ]}
+          >
+            {pista}
+          </Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -1705,13 +2223,37 @@ function crearEstilos(T: Tema) {
     },
     deptoCard: {
       flex: 1,
-      borderRadius: T.radioGrande,
-      borderWidth: 1.5,
+      borderRadius: T.radio,
+      backgroundColor: T.superficie,
       alignItems: "center",
-      paddingVertical: T.esps.xl,
+      justifyContent: "center",
+      // Antes: paddingVertical xl, que daba azulejos de ~160 px y dejaba
+      // media pantalla para seis departamentos. Con esto caben nueve o
+      // diez sin desplazar, que es la diferencia entre buscar y ver.
+      paddingVertical: T.esps.lg,
       paddingHorizontal: T.esps.md,
+      minHeight: 92,
+      ...sombraSuave,
     },
-    deptoNombre: { textAlign: "center", marginTop: T.esps.md },
+    // Encabezado de grupo en la vista lista: una regla superior y el nombre
+    // en versalitas tenues. Deliberadamente NO es una tarjeta ni una píldora:
+    // tiene que separar sin competir con los productos, que son lo que se
+    // toca.
+    sepDepto: {
+      flexDirection: "row",
+      alignItems: "center",
+      gap: T.esps.sm,
+      paddingTop: T.esps.lg,
+      paddingBottom: T.esps.xs,
+      paddingHorizontal: T.esps.xs,
+      borderTopWidth: StyleSheet.hairlineWidth,
+      borderTopColor: T.borde,
+      marginTop: T.esps.xs,
+    },
+    deptoIconoHueco: { height: 28, justifyContent: "center" },
+    deptoNombre: { textAlign: "center", marginTop: T.esps.sm },
+    deptoCuentaHueco: { height: 16, justifyContent: "center" },
+    deptoCuenta: { color: T.textoTenue },
 
     // Productos cuadrícula
     card: {
@@ -1855,6 +2397,59 @@ function crearEstilos(T: Tema) {
       marginBottom: T.esps.lg,
     },
 
+    // Pago mixto — el enlace que lo activa desde el modo simple, y todo lo
+    // que aparece una vez activado. Mismo lenguaje visual que el resto del
+    // modal (superficie2, radioChico, acento para lo interactivo), nada
+    // nuevo que aprender.
+    mixtoLink: {
+      alignItems: "center",
+      paddingVertical: T.esps.md,
+      marginTop: -T.esps.xs,
+      marginBottom: T.esps.lg,
+    },
+    mixtoCabecera: {
+      flexDirection: "row",
+      justifyContent: "space-between",
+      alignItems: "center",
+      marginBottom: T.esps.md,
+    },
+    filaMixta: {
+      backgroundColor: T.superficie,
+      borderRadius: T.radio,
+      borderWidth: 1,
+      borderColor: T.borde,
+      padding: T.esps.md,
+      marginBottom: T.esps.md,
+    },
+    filaMixtaMetodo: {
+      flexDirection: "row",
+      gap: T.esps.xs,
+      flexWrap: "wrap",
+    },
+    chipMetodo: {
+      paddingVertical: 8,
+      paddingHorizontal: 12,
+      borderRadius: T.radioChico,
+      backgroundColor: T.superficie2,
+    },
+    quitarFila: {
+      width: 44,
+      height: 44,
+      alignItems: "center",
+      justifyContent: "center",
+      borderRadius: T.radioChico,
+      backgroundColor: T.peligroSuave,
+    },
+    agregarFila: {
+      alignItems: "center",
+      paddingVertical: T.esps.md,
+      marginBottom: T.esps.lg,
+      borderRadius: T.radioChico,
+      borderWidth: 1,
+      borderColor: T.borde,
+      borderStyle: "dashed",
+    },
+
     // Toast
     avisoCaja: { position: "absolute", left: 0, right: 0, paddingHorizontal: T.esp },
     avisoInterior: {
@@ -1867,7 +2462,7 @@ function crearEstilos(T: Tema) {
       borderColor: T.borde,
       paddingHorizontal: T.esps.lg,
       paddingVertical: T.esps.md,
-      shadowColor: "#000",
+      shadowColor: T.esClaro ? T.bordeFuerte : "#000",
       shadowOpacity: 0.25,
       shadowRadius: 14,
       shadowOffset: { width: 0, height: 6 },

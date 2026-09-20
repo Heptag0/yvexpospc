@@ -33,6 +33,7 @@ import { StatusBar } from "expo-status-bar";
 import { Text, View } from "react-native";
 import "react-native-reanimated";
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { KeyboardProvider } from "react-native-keyboard-controller";
 import { useFonts } from "expo-font";
 import { Archivo_500Medium, Archivo_700Bold } from "@expo-google-fonts/archivo";
 import {
@@ -156,12 +157,31 @@ function Contenido() {
 // El GestureHandlerRootView envuelve TODA la app: es requisito de
 // react-native-gesture-handler para que los gestos (pellizcar/arrastrar del
 // recortador de fotos, entre otros) funcionen en cualquier pantalla.
+//
+// ---------------------------------------------------------------------------
+// EL ORDEN DE ESTOS TRES PROVEEDORES NO ES ARBITRARIO
+// ---------------------------------------------------------------------------
+// 1. GestureHandlerRootView    — el más externo, requisito de la librería.
+// 2. KeyboardProvider          — instala el observador nativo del teclado.
+// 3. TemaProvider              — estado de React, puede ir dentro sin más.
+//
+// El KeyboardProvider va DENTRO del gesture root y FUERA de todo lo que
+// dibuje pantallas, porque monta un observador a nivel de ventana: si
+// estuviera por debajo del Stack solo vería el árbol de una pantalla y los
+// componentes de teclado se comportarían como los de React Native — es decir,
+// no pasaría nada y no habría ningún error que lo delatara.
+//
+// No lleva `statusBarTranslucent`/`navigationBarTranslucent`: con
+// `edgeToEdgeEnabled: true` en app.json el modo ya es ese para toda la app, y
+// repetirlo aquí solo añade una segunda fuente de verdad para lo mismo.
 export default function RootLayout() {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <TemaProvider>
-        <Contenido />
-      </TemaProvider>
+      <KeyboardProvider>
+        <TemaProvider>
+          <Contenido />
+        </TemaProvider>
+      </KeyboardProvider>
     </GestureHandlerRootView>
   );
 }

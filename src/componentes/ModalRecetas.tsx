@@ -424,7 +424,28 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
   // Vistas
   // ---------------------------------------------------------------------------
 
-  function VistaLista() {
+  // LOS BLOQUES DE ABAJO SON FUNCIONES, NO COMPONENTES — Y ES A PROPOSITO
+  // ------------------------------------------------------------------------
+  // Antes eran `function VistaLista()` y se montaban como `<VistaLista />`. Al
+  // escribir en cualquier campo, cada letra cambiaba el estado, este modal se
+  // volvia a renderizar, y JavaScript creaba una funcion `VistaLista` NUEVA:
+  // identica en codigo, distinta en identidad. React lo lee como "otro
+  // componente", no como el mismo actualizado: desmonta el subarbol entero y
+  // monta uno nuevo. El TextInput con el foco dejaba de existir y Android
+  // cerraba el teclado, obligando a teclear letra por letra.
+  //
+  // Llamandolas como funciones (`renderVistaLista()`), el JSX queda inlineado
+  // en el render del padre: React compara View / TextInput / ScrollView, que
+  // son tipos estables. No hay remontaje y el foco sobrevive.
+  //
+  // Dos reglas para no repetirlo:
+  //  1. Ninguna de estas puede usar hooks. Hoy ninguna los usa. Si alguna
+  //     llegara a necesitar useState, NO basta con volverla componente
+  //     interno otra vez: hay que sacarla a nivel de modulo y pasarle lo que
+  //     necesite por props.
+  //  2. Al llamarlas dentro de JSX hay que envolverlas en llaves:
+  //     {renderVistaLista()}. Sin llaves, React imprime el texto literal.
+  function renderVistaLista() {
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
         <Banner texto={error} tipo="error" />
@@ -441,7 +462,7 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
             />
           </View>
           <View style={{ flex: 1 }}>
-            <Boton titulo="+ Nueva receta" onPress={abrirNuevaReceta} />
+            <Boton titulo="+ Receta" onPress={abrirNuevaReceta} />
           </View>
         </View>
 
@@ -470,7 +491,7 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function VistaDespensa() {
+  function renderVistaDespensa() {
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }}>
         <Banner texto={error} tipo="error" />
@@ -508,7 +529,7 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function VistaDespensaForm() {
+  function renderVistaDespensaForm() {
     const campo = (
       etiqueta: string,
       valor: string,
@@ -677,7 +698,7 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
     );
   }
 
-  function VistaDetalleReceta() {
+  function renderVistaDetalleReceta() {
     return (
       <ScrollView contentContainerStyle={{ padding: T.esp }} keyboardShouldPersistTaps="handled">
         <Banner texto={error} tipo="error" />
@@ -918,10 +939,10 @@ export default function ModalRecetas({ onCerrar }: { onCerrar: () => void }) {
       {/* CabeceraModal propia no aplica aquí (Hoja ya trae la suya con
           "Cerrar" fijo); el título dinámico se resuelve arriba y el botón
           de retroceso vive dentro de cada vista como parte del flujo. */}
-      {vista === "lista" && <VistaLista />}
-      {vista === "despensa" && <VistaDespensa />}
-      {vista === "despensaForm" && <VistaDespensaForm />}
-      {vista === "detalle" && <VistaDetalleReceta />}
+      {vista === "lista" && renderVistaLista()}
+      {vista === "despensa" && renderVistaDespensa()}
+      {vista === "despensaForm" && renderVistaDespensaForm()}
+      {vista === "detalle" && renderVistaDetalleReceta()}
 
       {/* Confirmaciones de borrado: hoja chica, sin Alert nativo. */}
       <Hoja

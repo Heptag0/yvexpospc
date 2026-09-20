@@ -9,11 +9,24 @@
 // clientes.limite_credito_centavos / saldo_centavos viven en lealtad.ts
 // (tipo Cliente) — se agregaron ahí para no duplicar el tipo.
 //
-// movimientos_cuenta es LOCAL-ONLY por ahora: el PC ya lo encola
-// (encolar_sync en clientes.rs), pero se revisó el MAPA de sync.py y esa
-// entidad no está — el servidor lo está descartando en silencio hoy.
-// clientes.saldo_centavos SÍ se encola: sync.py ya sabe recibir esa
-// columna (mismo patrón que se encontró con el conteo a ciegas).
+// ⚠️ movimientos_cuenta YA NO ES LOCAL-ONLY. El comentario anterior decía
+// que el servidor la descartaba en silencio, y era cierto: el PC la encolaba
+// y el MAPA no la tenía. Ahora la entidad existe en el servidor, y con ella
+// un cambio de fondo en QUIÉN MANDA sobre el saldo:
+//
+//   El saldo del cliente lo calcula el SERVIDOR, no los dispositivos.
+//   El trigger recalcular_saldo_cliente() lo reconstruye sumando toda la
+//   bitácora de movimientos_cuenta, igual que ya se hacía con `puntos`.
+//
+// Por qué: cada caja hacía "leo saldo, sumo, escribo" y subía el resultado.
+// Si el PC y este teléfono le fían al mismo cliente casi a la vez, el último
+// en sincronizar pisaba al otro y UNA DE LAS DOS DEUDAS DESAPARECÍA. Nadie
+// lo nota hasta que el cliente paga de menos.
+//
+// Consecuencia práctica para este archivo: encolar `clientes.saldo_centavos`
+// ya no sirve de nada (el servidor lo ignora a propósito: saldo_centavos no
+// está en las update_cols de esa entidad). Lo que SÍ hay que subir es el
+// MOVIMIENTO. Si un cargo no sube, para la nube esa deuda no existe.
 
 import { bd, uuid, ahoraISO } from "./db";
 import { encolar } from "./sync";
@@ -99,19 +112,25 @@ export async function registrarCargoEnTx(
     "UPDATE clientes SET saldo_centavos = ?, actualizado_en = ? WHERE id = ?",
     [nuevoSaldo, ahora, clienteId]
   );
+  const movId = uuid();
   await db.runAsync(
     `INSERT INTO movimientos_cuenta
        (id, cliente_id, tipo, monto_centavos, venta_id, metodo, saldo_resultante_centavos,
         motivo, usuario_pos_id, caja_sesion_id, creado_en, actualizado_en)
      VALUES (?,?,'cargo',?,?,NULL,?,NULL,?,?,?,?)`,
-    [uuid(), clienteId, montoCentavos, ventaId, nuevoSaldo, usuarioPosId, cajaSesionId, ahora, ahora]
+    [movId, clienteId, montoCentavos, ventaId, nuevoSaldo, usuarioPosId, cajaSesionId, ahora, ahora]
   );
 
-  // Solo el saldo del cliente se encola — sync.py ya lo espera. El
-  // movimiento en sí (movimientos_cuenta) se queda local, ver nota arriba.
-  await encolar("clientes", clienteId, {
-    id: clienteId, saldo_centavos: nuevoSaldo, actualizado_en: ahora,
-  }, "update");
+  // El MOVIMIENTO es lo que sube: de él deriva el servidor el saldo real.
+  // Va dentro de esta misma transacción (la abrió cobrar()), así que el cargo
+  // local y su entrada de sync nacen juntos o no nace ninguno.
+  await encolar("movimientos_cuenta", movId, {
+    id: movId, cliente_id: clienteId, tipo: "cargo",
+    monto_centavos: montoCentavos, venta_id: ventaId, metodo: null,
+    saldo_resultante_centavos: nuevoSaldo, motivo: null,
+    usuario_pos_id: usuarioPosId, caja_sesion_id: cajaSesionId,
+    creado_en: ahora, actualizado_en: ahora,
+  }, "insert");
 
   return nuevoSaldo;
 }
@@ -167,11 +186,19 @@ export async function registrarAbono(d: DatosAbono): Promise<number> {
         d.motivo ?? null, usuario, d.cajaSesionId ?? null, ahora, ahora,
       ]
     );
-  });
 
-  await encolar("clientes", d.clienteId, {
-    id: d.clienteId, saldo_centavos: nuevoSaldo, actualizado_en: ahora,
-  }, "update");
+    // DENTRO de la transacción, no después: antes el encolado quedaba fuera
+    // del withTransactionAsync, así que un fallo entre ambos dejaba un abono
+    // cobrado en el teléfono que la nube nunca veía — y con el trigger nuevo
+    // eso significa una deuda que el servidor sigue creyendo viva.
+    await encolar("movimientos_cuenta", movId, {
+      id: movId, cliente_id: d.clienteId, tipo: "abono",
+      monto_centavos: d.montoCentavos, venta_id: null, metodo: d.metodo,
+      saldo_resultante_centavos: nuevoSaldo, motivo: d.motivo ?? null,
+      usuario_pos_id: usuario, caja_sesion_id: d.cajaSesionId ?? null,
+      creado_en: ahora, actualizado_en: ahora,
+    }, "insert");
+  });
 
   return nuevoSaldo;
 }

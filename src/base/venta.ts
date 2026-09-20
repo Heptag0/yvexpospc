@@ -12,6 +12,12 @@ import { leerConfig, guardarConfig } from "./config";
 import { estadoCuenta } from "./nube";
 import { registrarCargoEnTx } from "./credito";
 import {
+  calcular as calcularImpuesto,
+  leerConfigImpuesto,
+  puntosBaseDesdePct,
+  type LineaImpuesto,
+} from "./impuestos";
+import {
   lineasVentaWeb,
   metodoPagoVentaWeb,
   ORIGEN_VENTA_WEB,
@@ -38,7 +44,7 @@ export type ItemCarrito = {
   es_kit: boolean;
 };
 
-export type MetodoPago = "efectivo" | "tarjeta" | "credito";
+export type MetodoPago = "efectivo" | "tarjeta" | "transferencia" | "credito";
 
 // ---------------------------------------------------------------------------
 // Turnos de caja
@@ -86,25 +92,34 @@ export async function abrirTurno(fondoCentavos: number): Promise<Turno> {
   const cuenta = await estadoCuenta();
   const id = uuid();
   const ahora = ahoraISO();
-  await db.runAsync(
-    `INSERT INTO caja_sesiones
-      (id, usuario_pos_id, fondo_inicial_centavos, abierta_en, estado, dispositivo_id, creado_en, actualizado_en)
-     VALUES (?,?,?,?, 'abierta', ?, ?, ?)`,
-    [id, usuario.id, fondoCentavos, ahora, cuenta.dispositivoId, ahora, ahora]
-  );
+  // Antes: el INSERT y el encolar() eran llamadas sueltas. Un crash justo
+  // entre las dos (la app cerrándose de golpe, por ejemplo) dejaba un
+  // turno que existe en el teléfono pero que la nube nunca vio — y
+  // cualquier update parcial posterior sobre ese turno (registrarConteoTurno,
+  // cerrarTurno) sería lo PRIMERO que el servidor recibe de él, sin
+  // abierta_en ni los demás campos NOT NULL. Es prácticamente seguro que
+  // así se produjo el "null value in column abierta_en" que se reportó.
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `INSERT INTO caja_sesiones
+        (id, usuario_pos_id, fondo_inicial_centavos, abierta_en, estado, dispositivo_id, creado_en, actualizado_en)
+       VALUES (?,?,?,?, 'abierta', ?, ?, ?)`,
+      [id, usuario.id, fondoCentavos, ahora, cuenta.dispositivoId, ahora, ahora]
+    );
 
-  // A la cola de subida: la nube exige el turno ANTES que sus ventas (FK).
-  // Sin dispositivo_id en el payload a propósito: el servidor lo inyecta él
-  // mismo desde el dispositivo autenticado (sync.py, "inyecta_dispositivo"),
-  // ignora lo que mande el cliente — mandarlo aquí no cambiaría nada.
-  await encolar("caja_sesiones", id, {
-    id,
-    usuario_pos_id: usuario.id,
-    fondo_inicial_centavos: fondoCentavos,
-    abierta_en: ahora,
-    cerrada_en: null,
-    estado: "abierta",
-    actualizado_en: ahora,
+    // A la cola de subida: la nube exige el turno ANTES que sus ventas (FK).
+    // Sin dispositivo_id en el payload a propósito: el servidor lo inyecta él
+    // mismo desde el dispositivo autenticado (sync.py, "inyecta_dispositivo"),
+    // ignora lo que mande el cliente — mandarlo aquí no cambiaría nada.
+    await encolar("caja_sesiones", id, {
+      id,
+      usuario_pos_id: usuario.id,
+      fondo_inicial_centavos: fondoCentavos,
+      abierta_en: ahora,
+      cerrada_en: null,
+      estado: "abierta",
+      actualizado_en: ahora,
+    });
   });
 
   return { id, fondo_inicial_centavos: fondoCentavos, abierta_en: ahora };
@@ -136,16 +151,46 @@ export async function cerrarTurno(turnoId: string): Promise<void> {
   }
 
   const ahora = ahoraISO();
+  // Cierre y encolado atómicos: si el encolado falla, el turno NO queda
+  // cerrado. Sueltos, podía quedar un turno cerrado en el teléfono que la
+  // nube sigue viendo abierto para siempre — y el dueño, desde el PC, un
+  // turno que nunca corta.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `UPDATE caja_sesiones SET estado = 'cerrada', cerrada_en = ?, actualizado_en = ? WHERE id = ?`,
     [ahora, ahora, turnoId]
   );
+  // El arqueo SÍ sube. La migración v24 renombró estas columnas justamente
+  // para que el conteo del móvil pudiera sincronizar ("puede sincronizar de
+  // verdad en vez de quedarse solo local"), pero el payload nunca se
+  // actualizó: el dueño no veía desde el PC ni el efectivo contado ni el
+  // faltante del turno cerrado en el teléfono. El servidor ya tiene las tres
+  // columnas en su MAPA.
+  const arqueo = await db.getFirstAsync<{
+    total_efectivo_esperado_centavos: number | null;
+    total_efectivo_contado_centavos: number | null;
+    diferencia_centavos: number | null;
+  }>(
+    `SELECT total_efectivo_esperado_centavos, total_efectivo_contado_centavos,
+            diferencia_centavos
+       FROM caja_sesiones WHERE id = ?`,
+    [turnoId]
+  );
   await encolar(
     "caja_sesiones",
     turnoId,
-    { id: turnoId, cerrada_en: ahora, estado: "cerrada", actualizado_en: ahora },
+    {
+      id: turnoId, cerrada_en: ahora, estado: "cerrada", actualizado_en: ahora,
+      // Con el conteo a ciegas apagado (por defecto) van en null, y el
+      // servidor no los toca: omitir un null es distinto de afirmarlo, y el
+      // contrato nuevo solo escribe lo que de verdad viene.
+      total_efectivo_esperado_centavos: arqueo?.total_efectivo_esperado_centavos ?? null,
+      total_efectivo_contado_centavos: arqueo?.total_efectivo_contado_centavos ?? null,
+      diferencia_centavos: arqueo?.diferencia_centavos ?? null,
+    },
     "update"
   );
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +218,11 @@ export async function registrarMovimientoCaja(d: DatosMovimientoCaja): Promise<s
   const id = uuid();
   const ahora = ahoraISO();
   const usuario = await usuarioActivoId();
+  // INSERT y encolado en la MISMA transacción: o los dos, o ninguno. Suelto,
+  // un fallo entre ambos dejaba un retiro de efectivo apuntado en el teléfono
+  // que la nube nunca ve, y el corte del dueño desde el PC no cuadra con el
+  // de la caja. Es la regla que ya rige en caja.rs, clientes.rs y cobrar().
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `INSERT INTO movimientos_caja
        (id, caja_sesion_id, tipo, motivo, monto_centavos, usuario_pos_id, creado_en, actualizado_en)
@@ -190,6 +240,7 @@ export async function registrarMovimientoCaja(d: DatosMovimientoCaja): Promise<s
     usuario_pos_id: usuario,
     creado_en: ahora,
     actualizado_en: ahora,
+  });
   });
   return id;
 }
@@ -217,16 +268,32 @@ export type Corte = {
   total_centavos: number;
   efectivo_centavos: number;
   tarjeta_centavos: number;
+  /** Puerto de caja.rs::CorteCaja — no existía en el móvil porque
+   *  "transferencia" no era un método válido antes del cobro mixto (v33).
+   *  Sin este campo, una venta por transferencia se cobraba bien pero
+   *  desaparecía del resumen del corte: no afectaba el cajón (correcto),
+   *  pero tampoco se contaba en NINGÚN lado. */
+  transferencia_centavos: number;
+  /** Mismo motivo: crédito ya existía como método, pero el corte nunca lo
+   *  desglosaba por separado — se veía mezclado dentro de "total_centavos"
+   *  sin poder distinguirlo. */
+  credito_centavos: number;
   fondo_centavos: number;
   /** Efectivo que ENTRÓ al cajón fuera de las ventas (cambio, depósitos). */
   entradas_centavos: number;
   /** Efectivo que SALIÓ del cajón (pago a proveedor, retiro, gastos). */
   salidas_centavos: number;
-  /** fondo + ventas en efectivo + entradas − salidas */
+  /** Devoluciones de producto reembolsadas en EFECTIVO en este turno — bajan
+   *  el cajón, pero separadas de las salidas normales para claridad del
+   *  corte. Puerto de caja.rs::calcular_corte() (antes el móvil no tenía
+   *  devoluciones en absoluto — ver migración v32). */
+  devoluciones_efectivo_centavos: number;
+  /** fondo + ventas en efectivo + entradas − salidas − devoluciones en efectivo */
   efectivo_esperado_centavos: number;
 };
 
-/** Corte del turno: totales por método y efectivo esperado en cajón. */
+/** Corte del turno: totales por método y efectivo esperado en cajón. Puerto
+ *  exacto de caja.rs::calcular_corte() del PC. */
 export async function corteTurno(turno: Turno): Promise<Corte> {
   const db = await bd();
   const tot = await db.getFirstAsync<{ n: number; t: number }>(
@@ -241,8 +308,11 @@ export async function corteTurno(turno: Turno): Promise<Corte> {
      GROUP BY p.metodo`,
     [turno.id]
   );
-  const efectivo = porMetodo.find((x) => x.metodo === "efectivo")?.m ?? 0;
-  const tarjeta = porMetodo.find((x) => x.metodo === "tarjeta")?.m ?? 0;
+  const porMet = (m: string) => porMetodo.find((x) => x.metodo === m)?.m ?? 0;
+  const efectivo = porMet("efectivo");
+  const tarjeta = porMet("tarjeta");
+  const transferencia = porMet("transferencia");
+  const credito = porMet("credito");
 
   // Movimientos de efectivo del turno: sin esto, el corte no puede cuadrar
   // cuando el dinero se movió por algo que no fue una venta.
@@ -254,16 +324,46 @@ export async function corteTurno(turno: Turno): Promise<Corte> {
   const entradas = movs.find((x) => x.tipo === "entrada")?.m ?? 0;
   const salidas = movs.find((x) => x.tipo === "salida")?.m ?? 0;
 
+  // Devoluciones de producto reembolsadas en efectivo en este turno.
+  //
+  // ⚠️ EL JOIN CON `ventas` NO ES DECORATIVO — puerto exacto de
+  // caja.rs::calcular_corte(). El total de arriba ya excluye ventas
+  // 'cancelada', pero sin este JOIN se restaría CUALQUIER devolución en
+  // efectivo sin mirar el estado de su venta. Como devoluciones.ts marca la
+  // venta como 'cancelada' cuando el motivo es "Cancelación", una venta
+  // cancelada (que ya quedó fuera del ingreso) volvería a restarse por su
+  // reembolso — un faltante fantasma del monto completo:
+  //
+  //   Venta de $100 en efectivo, luego cancelada
+  //     cajón real : +100 −100 =    0
+  //     corte mal  :    0 −100 = −100   <- faltante que nunca existió
+  //
+  // Las devoluciones normales ('devuelta_total'/'devuelta_parcial') SÍ se
+  // restan, porque su venta sí sumó al efectivo esperado arriba.
+  const dev = await db.getFirstAsync<{ d: number }>(
+    `SELECT COALESCE(SUM(dv.total_devuelto_centavos),0) AS d
+     FROM devoluciones dv
+     JOIN ventas v ON v.id = dv.venta_id
+     WHERE dv.caja_sesion_id = ?
+       AND dv.metodo_reembolso = 'efectivo'
+       AND v.estado <> 'cancelada'`,
+    [turno.id]
+  );
+  const devolucionesEfectivo = dev?.d ?? 0;
+
   return {
     tickets: tot?.n ?? 0,
     total_centavos: tot?.t ?? 0,
     efectivo_centavos: efectivo,
     tarjeta_centavos: tarjeta,
+    transferencia_centavos: transferencia,
+    credito_centavos: credito,
     fondo_centavos: turno.fondo_inicial_centavos,
     entradas_centavos: entradas,
     salidas_centavos: salidas,
+    devoluciones_efectivo_centavos: devolucionesEfectivo,
     efectivo_esperado_centavos:
-      turno.fondo_inicial_centavos + efectivo + entradas - salidas,
+      turno.fondo_inicial_centavos + efectivo + entradas - salidas - devolucionesEfectivo,
   };
 }
 
@@ -333,6 +433,8 @@ export async function registrarConteoTurno(
 
   const db = await bd();
   const ahora = ahoraISO();
+  // Atómico, misma regla que el resto: el arqueo y su encolado van juntos.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `UPDATE caja_sesiones
         SET total_efectivo_esperado_centavos = ?,
@@ -353,6 +455,7 @@ export async function registrarConteoTurno(
     diferencia_centavos: diferencia,
     actualizado_en: ahora,
   }, "update");
+  });
 
   return { diferenciaCentavos: diferencia };
 }
@@ -440,13 +543,70 @@ export async function resumenBolsaPorUsuario(): Promise<ResumenUsuarioBolsa[]> {
 // Cobro (transaccional)
 // ---------------------------------------------------------------------------
 
+/** Serie (prefijo) de folio de ESTA caja, p. ej. "A". La asigna el servidor
+ *  al vincular, para que dos cajas del mismo negocio no generen la misma
+ *  serie de folios. Vacío = caja sin vincular: entonces el folio se muestra
+ *  a secas, como siempre.
+ *
+ *  ⚠️ La clave es `prefijo_folio`, que es la que ya escribe nube.ts al
+ *  vincular (guardarSesion) y la que borra al desvincular. El PC usa
+ *  `sync_prefijo_folio` para lo mismo, pero son bases distintas: aquí manda
+ *  el nombre que el móvil ya usaba, no el del PC. */
+export async function leerPrefijoFolio(): Promise<string> {
+  const v = await leerConfig("prefijo_folio");
+  return (v ?? "").trim().toUpperCase();
+}
+
+/** Cómo se escribe un folio de cara al usuario.
+ *
+ *  ⚠️ El folio NO es único entre cajas: cada una numera desde 1. Antes eso
+ *  hacía imposible saber si "#3" era la venta de este teléfono o la del PC
+ *  —y en la pantalla de devoluciones llegó a devolverse la venta
+ *  equivocada—. Con la serie delante, "A-3" y "B-3" se distinguen solas.
+ *
+ *  Solo se puede poner serie a las ventas de ESTA caja: de una venta que
+ *  llegó de otra caja el teléfono no conoce su serie (el espejo de la nube
+ *  guarda el dispositivo, no el prefijo), así que esas se muestran a secas
+ *  en vez de inventarles una serie que sería mentira. */
+export function etiquetaFolio(
+  folio: number,
+  prefijo: string,
+  esDeEstaCaja: boolean
+): string {
+  return esDeEstaCaja && prefijo ? `${prefijo}-${folio}` : `#${folio}`;
+}
+
 export type ResultadoCobro = {
   venta_id: string;
   folio: number;
   total_centavos: number;
+  /** Cambio TOTAL de la venta (suma del cambio de cada pago en efectivo). */
   cambio_centavos: number;
   /** Descuento de lealtad aplicado (0 si no hubo). Para el recibo. */
   descuento_centavos: number;
+  /** Impuesto YA CONTENIDO en el total (modo "incluido", el único que hay).
+   *  0 si el negocio tiene el impuesto apagado — la mayoría.
+   *
+   *  Existe porque sin él el ticket no podía desglosar nada: el impuesto se
+   *  calculaba y se guardaba en `ventas.iva_centavos`, pero nunca salía de
+   *  cobrar(), así que activar el impuesto "no hacía nada visible" — el
+   *  recibo salía idéntico con IVA encendido o apagado. */
+  impuesto_centavos: number;
+  /** Cómo lo llama el negocio ("IVA", "Impuesto", "Sales Tax"…), para
+   *  rotular el renglón del recibo con su nombre real. */
+  impuesto_nombre: string;
+  /** Serie de esta caja ("A"), o "" si no está vinculada. Para el recibo. */
+  folio_prefijo: string;
+  /** Desglose REAL de lo aplicado, uno por cada pago que sí cubrió algo —
+   *  después del reparto, no lo que se pidió. Un pago que no cubrió nada
+   *  (el total ya estaba cubierto por los anteriores) no genera fila aquí,
+   *  igual que no genera fila en la tabla `pagos`. Para el ticket. */
+  pagos: {
+    metodo: MetodoPago;
+    monto_centavos: number;
+    recibido_centavos: number | null;
+    cambio_centavos: number | null;
+  }[];
 };
 
 export type OpcionesCobro = {
@@ -459,13 +619,33 @@ export type OpcionesCobro = {
   descuentoCentavos?: number;
 };
 
+/** Un pago de la venta (puede haber varios = pago mixto). Puerto exacto de
+ *  PagoEntrada en ventas.rs. */
+export type PagoEntrada = {
+  metodo: MetodoPago;
+  monto_centavos: number;
+  /** Solo aplica a "efectivo": lo que el cliente entregó físicamente. Si se
+   *  omite, se asume pago exacto (recibido = monto_centavos, sin cambio). */
+  recibido_centavos?: number;
+};
+
+const METODOS_VALIDOS: MetodoPago[] = ["efectivo", "tarjeta", "transferencia", "credito"];
+
 export async function cobrar(
   items: ItemCarrito[],
-  metodo: MetodoPago,
-  pagadoCentavos: number,
+  pagos: PagoEntrada[],
   opciones?: OpcionesCobro
 ): Promise<ResultadoCobro> {
   if (items.length === 0) throw new Error("El ticket está vacío.");
+  if (pagos.length === 0) throw new Error("No se registró ningún pago.");
+  for (const p of pagos) {
+    if (!METODOS_VALIDOS.includes(p.metodo)) {
+      throw new Error(`Método de pago inválido: ${p.metodo}`);
+    }
+    if (p.monto_centavos <= 0) {
+      throw new Error("Cada pago debe ser mayor a cero.");
+    }
+  }
   const turno = await turnoActivo();
   if (!turno) throw new Error("No hay un turno de caja abierto.");
 
@@ -480,14 +660,149 @@ export async function cobrar(
     Math.min(Math.floor(opciones?.descuentoCentavos ?? 0), subtotal)
   );
   const clienteId = opciones?.clienteId ?? null;
-  const total = subtotal - descuento;
-  // Crédito exige un cliente — no se puede vender "a crédito" sin saber a
-  // quién se le va a cobrar después.
-  if (metodo === "credito" && !clienteId)
-    throw new Error("Elige un cliente para vender a crédito.");
-  if (metodo === "efectivo" && pagadoCentavos < total)
-    throw new Error("El efectivo recibido no alcanza para el total.");
-  const cambio = metodo === "efectivo" ? pagadoCentavos - total : 0;
+  const neto = subtotal - descuento;
+
+  // ---------------------------------------------------------------------
+  // Impuesto configurable (IVA / Sales Tax / IEPS…) — puerto exacto del
+  // paso 3b de ventas.rs::cobrar() en el PC.
+  //
+  // El descuento global se reparte PROPORCIONAL al peso de cada línea antes
+  // de calcular el impuesto por línea (mismo criterio que el PC: una línea
+  // que es el 40% del subtotal absorbe el 40% del descuento global antes de
+  // impuesto, no un reparto parejo).
+  //
+  // Se calcula ANTES de abrir la transacción de escritura porque el total
+  // (columna de `ventas`) depende de este resultado en modo "agregado" —
+  // necesitamos el número ANTES del INSERT, no después.
+  //
+  // La tasa de cada línea se lee FRESCA de `productos` (nunca del carrito
+  // del frontend): mismo criterio de "el dinero se cuadra a la fuente" que
+  // ya rige para costo_centavos más abajo.
+  const dbLectura = await bd();
+  const lineasImp: LineaImpuesto[] = [];
+  for (const it of items) {
+    const totalLinea = Math.round(it.precio_centavos * it.cantidad);
+    const proporcion = subtotal > 0 ? totalLinea / subtotal : 0;
+    const importe = subtotal > 0
+      ? Math.round(totalLinea - descuento * proporcion)
+      : totalLinea;
+    const prodImp = await dbLectura.getFirstAsync<{ iva_tasa: number | null }>(
+      "SELECT iva_tasa FROM productos WHERE id = ?",
+      [it.producto_id]
+    );
+    lineasImp.push({
+      importeCentavos: importe,
+      tasaBase: puntosBaseDesdePct(prodImp?.iva_tasa ?? 0),
+    });
+  }
+  const cfgImpuesto = await leerConfigImpuesto();
+  const desgloseImpuesto = calcularImpuesto(cfgImpuesto, lineasImp);
+  const iva = desgloseImpuesto.impuestoCentavos;
+  // El total es SIEMPRE el neto. Con el modo "incluido" (el único que existe
+  // desde que se unificó con el PC — ver impuestos.ts) el impuesto ya está
+  // dentro del precio: se desglosa en el ticket, no se suma encima.
+  //
+  // Antes había aquí una rama `modo === "agregado" ? neto + iva : neto`, y
+  // era la causa de un bug real: la pantalla de cobro mostraba el total del
+  // carrito y esta línea exigía uno mayor, así que la venta se rechazaba
+  // sola con "el pago no cubre el total".
+  const total = neto;
+  // ---------------------------------------------------------------------
+
+  // ---------------------------------------------------------------------
+  // Reparto de pagos — puerto exacto del paso 4 de ventas.rs::cobrar().
+  //
+  // ⚠️ ESTE BLOQUE ARREGLA EL BUG MÁS CARO QUE HA TENIDO EL POS (ya ocurrió
+  // en el PC). Léelo antes de tocarlo.
+  //
+  // Antes (un solo método): `pagos.monto_centavos` guardaba directamente lo
+  // que se le pasaba, y con efectivo eso era el TOTAL, nunca lo entregado —
+  // así que el bug de fondo (guardar lo entregado en vez de lo aplicado)
+  // nunca llegó a manifestarse en el móvil. Con pago MIXTO sí puede pasar en
+  // cuanto se permite capturar "cuánto entrega" por separado de "cuánto
+  // cubre": si se guardara lo entregado, el corte de caja se inflaría por
+  // cada cambio dado, exactamente como pasó en el PC.
+  //
+  // Reglas:
+  //   - El crédito cubre EXACTAMENTE su parte — nunca hay vuelto sobre fiado.
+  //   - El resto del total se reparte entre los demás pagos, EN ORDEN.
+  //   - Un método sin cambio posible (tarjeta/transferencia) que se queda
+  //     corto es un error: el excedente no se puede devolver, cobraría de
+  //     más y lo contaría como venta.
+  //   - Un pago en efectivo que no cubre nada (el total ya quedó cubierto
+  //     por los anteriores) NO es un error: simplemente no genera fila en
+  //     `pagos` — el cajero devolvió el billete entero como cambio.
+  //
+  // A partir de aquí, en cada fila de `pagos`:
+  //     monto_centavos    = lo que ESE pago cubre de la venta -> va al cajón
+  //     recibido_centavos = lo que el cliente entregó (solo efectivo)
+  //     cambio_centavos   = entregado − aplicado (por pago, no global)
+  const montoCredito = pagos
+    .filter((p) => p.metodo === "credito")
+    .reduce((s, p) => s + p.monto_centavos, 0);
+  if (montoCredito > 0 && !clienteId) {
+    throw new Error("Una venta a crédito necesita un cliente asignado.");
+  }
+
+  const totalPagado = pagos.reduce((s, p) => s + p.monto_centavos, 0);
+  if (totalPagado < total) {
+    throw new Error(
+      `El pago ($${(totalPagado / 100).toFixed(2)}) no cubre el total ($${(total / 100).toFixed(2)}).`
+    );
+  }
+  if (montoCredito > total) {
+    throw new Error("El crédito no puede ser mayor que el total de la venta.");
+  }
+
+  let porCubrir = total - montoCredito;
+  const aplicados: number[] = new Array(pagos.length).fill(0);
+
+  // ⚠️ EL ORDEN IMPORTA, y es la causa de un bug real encontrado en pruebas
+  // (mismo que ya se cazó en el PC): antes se recorría `pagos` en el orden
+  // en que el cajero los capturó. Con un total de $150 y el cajero
+  // capturando "efectivo $150 + tarjeta $50", el efectivo consumía el total
+  // entero y la tarjeta se quedaba con $0 aplicado — lo que disparaba
+  // "debe ser por el importe exacto" y BLOQUEABA una venta perfectamente
+  // válida (el cliente paga $50 con tarjeta y da $150 en efectivo para
+  // recibir $50 de cambio).
+  //
+  // El orden correcto no es el de captura, es el de la realidad física:
+  //   1. Crédito: cubre exactamente su parte, nunca hay vuelto sobre fiado.
+  //   2. Tarjeta y transferencia: NO pueden dar cambio, así que tienen que
+  //      aplicarse completas mientras todavía queda total por cubrir.
+  //   3. Efectivo AL FINAL: es el único que puede absorber el sobrante y
+  //      devolver la diferencia como cambio.
+  pagos.forEach((p, i) => {
+    if (p.metodo === "credito") aplicados[i] = p.monto_centavos;
+  });
+
+  pagos.forEach((p, i) => {
+    if (p.metodo === "credito" || p.metodo === "efectivo") return;
+    const aplicado = Math.min(p.monto_centavos, porCubrir);
+    if (aplicado < p.monto_centavos) {
+      throw new Error(
+        `Un pago con ${p.metodo} debe ser por el importe exacto: no se puede dar cambio.`
+      );
+    }
+    porCubrir -= aplicado;
+    aplicados[i] = aplicado;
+  });
+
+  pagos.forEach((p, i) => {
+    if (p.metodo !== "efectivo") return;
+    const aplicado = Math.min(p.monto_centavos, porCubrir);
+    porCubrir -= aplicado;
+    aplicados[i] = aplicado;
+  });
+
+  // Cambio total = lo entregado en efectivo menos lo que ese efectivo cubrió,
+  // sumado por pago (no imputado todo al primero).
+  const cambio = pagos.reduce((suma, p, i) => {
+    if (p.metodo !== "efectivo") return suma;
+    const entregado = Math.max(p.recibido_centavos ?? p.monto_centavos, p.monto_centavos);
+    return suma + Math.max(entregado - aplicados[i], 0);
+  }, 0);
+  // ---------------------------------------------------------------------
 
   // Quién está vendiendo.
   const usuario = await asegurarUsuario();
@@ -496,11 +811,31 @@ export async function cobrar(
   const db = await bd();
   const ventaId = uuid();
   const ahora = ahoraISO();
+  // El folio se calcula dentro de la transacción y se recoge por CLOSURE.
+  // Antes viajaba por `globalThis.__ultimoFolio`: estado global mutable que,
+  // si dos cobros llegaran a solaparse, devolvería el folio del otro. Y el
+  // `?? 0` de la lectura enmascaraba el fallo en vez de gritarlo — un ticket
+  // impreso como "Venta #0" y nadie sabría por qué.
+  let folioAsignado = 0;
 
   await db.withTransactionAsync(async () => {
-    // Folio consecutivo local.
+    // Folio consecutivo DE ESTA CAJA.
+    //
+    // El MAX se limita a las ventas propias (origen <> 'nube'). Sin ese
+    // filtro, el contador tomaba también las ventas BAJADAS de las otras
+    // cajas: el móvil iba por el folio 5, sincronizaba, y su siguiente ticket
+    // saltaba al 267 porque el PC llevaba esa cuenta. El cliente recibía un
+    // número que daba saltos y la serie dejaba de ser propia.
+    //
+    // No había riesgo de duplicado en la nube (el servidor exige
+    // UNIQUE (dispositivo_id, folio) y a cada caja le inyecta el suyo), pero
+    // el folio es lo que el cliente ve impreso y lo que el dueño usa para
+    // buscar una venta: tiene que ser una serie limpia por caja.
+    //
+    // Mismo criterio que el PC, que filtra por dispositivo_id (ventas.rs).
+    // Aquí se usa `origen` porque la tabla local no guarda dispositivo_id.
     const f = await db.getFirstAsync<{ m: number }>(
-      "SELECT COALESCE(MAX(folio),0) AS m FROM ventas"
+      "SELECT COALESCE(MAX(folio),0) AS m FROM ventas WHERE origen <> 'nube'"
     );
     const folio = (f?.m ?? 0) + 1;
 
@@ -508,8 +843,8 @@ export async function cobrar(
       `INSERT INTO ventas
         (id, caja_sesion_id, usuario_pos_id, folio, subtotal_centavos, descuento_centavos,
          iva_centavos, total_centavos, estado, cliente_id, creado_en, actualizado_en)
-       VALUES (?,?,?,?,?,?,0,?, 'completada', ?, ?, ?)`,
-      [ventaId, turno.id, usuario.id, folio, subtotal, descuento, total, clienteId, ahora, ahora]
+       VALUES (?,?,?,?,?,?,?,?, 'completada', ?, ?, ?)`,
+      [ventaId, turno.id, usuario.id, folio, subtotal, descuento, iva, total, clienteId, ahora, ahora]
     );
 
     for (const it of items) {
@@ -544,7 +879,11 @@ export async function cobrar(
       if (it.es_kit) {
         // Kit: descontar stock de cada componente.
         const comps = await db.getAllAsync<{ producto_id: string; cantidad: number }>(
-          "SELECT producto_id, cantidad FROM kit_componentes WHERE kit_id = ?",
+          // kc.eliminado = 0 o se descuenta DE MÁS: al editar un kit las
+          // piezas retiradas se marcan (no se borran), y sin el filtro se
+          // descontarían todas las versiones. Editar "10 master" a "20" y de
+          // vuelta a "10" haría que vender uno descontara 10+20+10 = 40.
+          "SELECT producto_id, cantidad FROM kit_componentes WHERE kit_id = ? AND eliminado = 0",
           [it.producto_id]
         );
         for (const c of comps) {
@@ -563,24 +902,38 @@ export async function cobrar(
       }
     }
 
-    await db.runAsync(
-      `INSERT INTO pagos (id, venta_id, metodo, monto_centavos, creado_en)
-       VALUES (?,?,?,?,?)`,
-      [uuid(), ventaId, metodo, total, ahora]
-    );
+    // Un pago que no cubre nada (el total ya quedó cubierto por los
+    // anteriores) no se registra — sería un renglón de $0 en el ticket, y
+    // el corte tampoco debe contarlo.
+    for (let i = 0; i < pagos.length; i++) {
+      const p = pagos[i];
+      const aplicado = aplicados[i];
+      if (aplicado <= 0) continue;
+      let recibido: number | null = null;
+      let cambioPago: number | null = null;
+      if (p.metodo === "efectivo") {
+        const entregado = Math.max(p.recibido_centavos ?? p.monto_centavos, p.monto_centavos);
+        recibido = entregado;
+        cambioPago = Math.max(entregado - aplicado, 0);
+      }
+      await db.runAsync(
+        `INSERT INTO pagos (id, venta_id, metodo, monto_centavos, recibido_centavos, cambio_centavos, creado_en, actualizado_en)
+         VALUES (?,?,?,?,?,?,?,?)`,
+        [uuid(), ventaId, p.metodo, aplicado, recibido, cambioPago, ahora, ahora]
+      );
+    }
 
     // Crédito: sube el saldo del cliente DENTRO de esta misma transacción —
     // la venta y el cargo nacen juntos o no nacen, igual que
     // registrar_cargo_en_tx del PC (nunca una llamada suelta aparte).
-    if (metodo === "credito" && clienteId) {
-      await registrarCargoEnTx(clienteId, total, ventaId, usuario.id, turno.id);
+    if (montoCredito > 0 && clienteId) {
+      await registrarCargoEnTx(clienteId, montoCredito, ventaId, usuario.id, turno.id);
     }
 
-    // Guardar el folio para devolverlo fuera de la transacción.
-    (globalThis as any).__ultimoFolio = folio;
+    folioAsignado = folio;
   });
 
-  const folio = (globalThis as any).__ultimoFolio ?? 0;
+  const folio = folioAsignado;
 
   // ---- A la cola de subida (no bloquea la venta: solo escribe local) ----
   // El orden importa poco (el servidor reordena por dependencias), pero lo
@@ -597,7 +950,7 @@ export async function cobrar(
     cliente_id: clienteId,
     subtotal_centavos: subtotal,
     descuento_centavos: descuento,
-    iva_centavos: 0,
+    iva_centavos: iva,
     total_centavos: total,
     estado: "completada",
     creado_en: ahora,
@@ -625,20 +978,23 @@ export async function cobrar(
     });
   }
 
-  const pago = await db2.getFirstAsync<any>(
-    "SELECT * FROM pagos WHERE venta_id = ?",
+  const pagosDb = await db2.getAllAsync<{
+    id: string; metodo: MetodoPago; monto_centavos: number;
+    recibido_centavos: number | null; cambio_centavos: number | null; creado_en: string;
+  }>(
+    "SELECT id, metodo, monto_centavos, recibido_centavos, cambio_centavos, creado_en FROM pagos WHERE venta_id = ?",
     [ventaId]
   );
-  if (pago) {
-    await encolar("pagos", pago.id, {
-      id: pago.id,
+  for (const pg of pagosDb) {
+    await encolar("pagos", pg.id, {
+      id: pg.id,
       venta_id: ventaId,
-      metodo: pago.metodo,
-      monto_centavos: pago.monto_centavos,
-      recibido_centavos: metodo === "efectivo" ? pagadoCentavos : null,
-      cambio_centavos: cambio,
-      creado_en: pago.creado_en,
-      actualizado_en: pago.creado_en,
+      metodo: pg.metodo,
+      monto_centavos: pg.monto_centavos,
+      recibido_centavos: pg.recibido_centavos,
+      cambio_centavos: pg.cambio_centavos,
+      creado_en: pg.creado_en,
+      actualizado_en: pg.creado_en,
     });
   }
 
@@ -650,7 +1006,7 @@ export async function cobrar(
     if (it.es_kit) {
       // Un kit descuenta el stock de sus COMPONENTES (no el suyo).
       const comps = await db2.getAllAsync<{ producto_id: string }>(
-        "SELECT producto_id FROM kit_componentes WHERE kit_id = ?",
+        "SELECT producto_id FROM kit_componentes WHERE kit_id = ? AND eliminado = 0",
         [it.producto_id]
       );
       for (const c of comps) idsAfectados.add(c.producto_id);
@@ -682,6 +1038,15 @@ export async function cobrar(
     total_centavos: total,
     cambio_centavos: cambio,
     descuento_centavos: descuento,
+    impuesto_centavos: iva,
+    impuesto_nombre: cfgImpuesto.nombre,
+    folio_prefijo: await leerPrefijoFolio(),
+    pagos: pagosDb.map((pg) => ({
+      metodo: pg.metodo,
+      monto_centavos: pg.monto_centavos,
+      recibido_centavos: pg.recibido_centavos,
+      cambio_centavos: pg.cambio_centavos,
+    })),
   };
 }
 
@@ -777,12 +1142,26 @@ export async function registrarVentaWeb(
   );
   const total = subtotal; // sin descuento: el pedido ya trae su total final
 
+  // Mismo motivo que en cobrar(): por closure, no por estado global.
+  let folioWebAsignado = 0;
+
   await db.withTransactionAsync(async () => {
+    // Mismo criterio que cobrar(): el folio es de ESTA caja, así que el MAX
+    // excluye las ventas bajadas de otras. Un pedido web se registra en esta
+    // caja, por eso comparte serie con las de mostrador (y por eso su
+    // `origen` es 'web', no 'nube').
     const f = await db.getFirstAsync<{ m: number }>(
-      "SELECT COALESCE(MAX(folio),0) AS m FROM ventas"
+      "SELECT COALESCE(MAX(folio),0) AS m FROM ventas WHERE origen <> 'nube'"
     );
     const folio = (f?.m ?? 0) + 1;
 
+    // `descuento_centavos` e `iva_centavos` se quedan en 0 A PROPÓSITO, no es
+    // un olvido: `total` ya es el precio que el cliente aceptó pagar en la
+    // tienda en línea (pedido.total_centavos, fijado por el checkout web).
+    // Recalcular impuesto aquí y sumarlo (modo "agregado") cobraría MÁS de
+    // lo que el cliente vio y aceptó pagar al hacer el pedido — mismo
+    // criterio que usa ventas.rs del PC para un "concepto libre": el monto ya
+    // cotizado no se vuelve a gravar encima.
     await db.runAsync(
       `INSERT INTO ventas
         (id, caja_sesion_id, usuario_pos_id, folio, subtotal_centavos, descuento_centavos,
@@ -822,10 +1201,13 @@ export async function registrarVentaWeb(
       }
     }
 
+    // Pago único y exacto (pedido web: siempre por el total, sin cambio) —
+    // mismas columnas que cobrar() desde la migración v33, aunque aquí no
+    // hace falta reparto porque solo hay un pago.
     await db.runAsync(
-      `INSERT INTO pagos (id, venta_id, metodo, monto_centavos, creado_en)
-       VALUES (?,?,?,?,?)`,
-      [uuid(), ventaId, metodo, total, ahora]
+      `INSERT INTO pagos (id, venta_id, metodo, monto_centavos, recibido_centavos, cambio_centavos, creado_en, actualizado_en)
+       VALUES (?,?,?,?,?,0,?,?)`,
+      [uuid(), ventaId, metodo, total, metodo === "efectivo" ? total : null, ahora, ahora]
     );
 
     // Marca anti-duplicado DENTRO de la transacción: venta y marca nacen
@@ -835,10 +1217,10 @@ export async function registrarVentaWeb(
       [claveMarca, ventaId, ventaId]
     );
 
-    (globalThis as any).__ultimoFolioWeb = folio;
+    folioWebAsignado = folio;
   });
 
-  const folio = (globalThis as any).__ultimoFolioWeb ?? 0;
+  const folio = folioWebAsignado;
 
   // ---- A la cola de subida (mismo esquema que cobrar; la nube no recibe
   // `origen` porque su MAPA de columnas no lo incluye). ----
@@ -932,17 +1314,39 @@ export type ResumenHoy = {
 
 export async function resumenHoy(): Promise<ResumenHoy> {
   const db = await bd();
+  const desde = inicioHoyISO();
   const fila = await db.getFirstAsync<{ n: number; t: number }>(
     `SELECT COUNT(*) AS n, COALESCE(SUM(total_centavos),0) AS t
      FROM ventas WHERE estado <> 'cancelada' AND creado_en >= ?`,
-    [inicioHoyISO()]
+    [desde]
   );
+
+  // Devoluciones del día. Sin esto, la lámina de Inicio mostraba el BRUTO
+  // mientras Reportes (reportes.ts::resumenEntre) muestra el neto: el mismo
+  // día daba dos cifras distintas en dos pestañas.
+  //
+  // ⚠️ El JOIN con `ventas` no es adorno — mismo filtro que corteTurno() unas
+  // líneas más arriba. devoluciones.ts implementa la cancelación como una
+  // devolución total que deja la venta en 'cancelada'; como el SELECT de
+  // arriba ya la excluye del ingreso, restar además su reembolso descontaría
+  // el mismo dinero dos veces.
+  const dev = await db.getFirstAsync<{ d: number }>(
+    `SELECT COALESCE(SUM(dv.total_devuelto_centavos),0) AS d
+     FROM devoluciones dv JOIN ventas v ON v.id = dv.venta_id
+     WHERE v.estado <> 'cancelada' AND dv.creado_en >= ?`,
+    [desde]
+  );
+
   const n = fila?.n ?? 0;
   const t = fila?.t ?? 0;
+  const devuelto = dev?.d ?? 0;
   return {
-    total_centavos: t,
+    total_centavos: t - devuelto,
     tickets: n,
-    promedio_centavos: n > 0 ? Math.round(t / n) : 0,
+    // Promedio sobre el NETO, igual que ResumenRango en reportes.ts. Tiene
+    // que cumplirse que total ÷ tickets = promedio: las tres cifras se
+    // pintan juntas en la lámina y cualquier otra cosa se lee como un fallo.
+    promedio_centavos: n > 0 ? Math.round((t - devuelto) / n) : 0,
   };
 }
 

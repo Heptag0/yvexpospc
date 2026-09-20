@@ -117,6 +117,10 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
   const [precio, setPrecio] = useState(producto ? centavosATexto(producto.precio_venta_centavos) : "");
   const [costo, setCosto] = useState(centavosATexto(producto?.costo_centavos ?? null));
   const [mayoreo, setMayoreo] = useState(centavosATexto(producto?.precio_mayoreo_centavos ?? null));
+  // Exento por defecto (0) — mismo default que la columna en SQLite y mismo
+  // criterio que la mayoría de negocios: la mayoría lo deja apagado. Solo
+  // 0/16 son válidos (ver inventario.ts::validar), así que un simple sí/no
+  // basta — no hace falta un selector de porcentaje libre.
   const [controlaStock, setControlaStock] = useState(producto ? producto.controla_stock === 1 : true);
   const [stock, setStock] = useState(String(producto?.stock ?? 0));
   const [stockMin, setStockMin] = useState(String(producto?.stock_minimo ?? 0));
@@ -403,6 +407,11 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
       es_kit: esKit,
       favorito,
       imagen_uri: imagenUri,
+      // Siempre 0 = "usa la tasa general del negocio" (ver impuestos.ts).
+      // El impuesto por producto se retiró para igualar al PC: allí la
+      // tasa configurada se aplica a todo el catálogo, sin excepciones
+      // por artículo. Ver la migración v34 en db.ts.
+      iva_tasa: 0,
       componentes: componentes.map((c) => ({
         producto_id: c.producto_id,
         cantidad: aNumero(c.cantidad),
@@ -445,6 +454,68 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
           cargando={guardando}
         />
       }
+      /* LIGHTBOX Y RECORTADOR VAN AQUI, NO DENTRO DE children
+         ------------------------------------------------------------------
+         Estaban al final de children, dentro del ScrollView de <Hoja>. Su
+         absoluteFill se medía contra el contenido desplazable, no contra la
+         pantalla: la foto acababa dibujada al fondo del scroll y la barra de
+         Cancelar/Listo quedaba fuera de vista. Encima, cabecera y pie —que
+         son hermanos del ScrollView— seguían pintándose por delante, así que
+         "Crear producto" se podía pulsar con el recortador abierto y el
+         producto se creaba SIN la foto, sin avisar de nada.
+         Como superposición, <Hoja> los monta como hermanos de cabecera y
+         pie, y además oculta el pie mientras estén abiertos. */
+      superposicion={
+        lightboxAbierto || (ajustarAbierto && ajusteUri) ? (
+          <>
+            {lightboxAbierto && imagenUri && (
+              <View style={estLightbox.raiz}>
+                {/* Modo Rendimiento: el desenfoque con GPU es lo único pesado de
+                    toda esta pantalla — en un dispositivo de gama baja se siente
+                    con lag. Apagado, se compensa oscureciendo más fuerte en vez
+                    de dejar la foto de fondo asomando sin difuminar. */}
+                {!prefs.modoRendimiento && (
+                  <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
+                )}
+                <View
+                  style={[
+                    StyleSheet.absoluteFill,
+                    estLightbox.oscurecer,
+                    prefs.modoRendimiento && { backgroundColor: "rgba(0,0,0,0.75)" },
+                  ]}
+                />
+                <Pressable style={StyleSheet.absoluteFill} onPress={() => setLightboxAbierto(false)} />
+                <View style={estLightbox.imagenWrap} pointerEvents="box-none">
+                  <Image source={{ uri: imagenUri }} style={estLightbox.imagen} resizeMode="contain" />
+                </View>
+                <View style={estLightbox.acciones}>
+                  <BotonLightbox icono="imagen" label="Ajustar" onPress={() => accionDesdeLightbox(() => void abrirAjustarActual())} />
+                  <BotonLightbox icono="camara" label="Cámara" onPress={() => accionDesdeLightbox(() => cambiarFoto("camara"))} />
+                  <BotonLightbox icono="imagen" label="Galería" onPress={() => accionDesdeLightbox(() => cambiarFoto("galeria"))} />
+                  {hayRecorte && (
+                    <BotonLightbox icono="imagen" label="Quitar fondo" onPress={() => accionDesdeLightbox(() => void recortarFondo())} />
+                  )}
+                </View>
+                <Pressable style={estLightbox.cerrar} onPress={() => setLightboxAbierto(false)} hitSlop={10}>
+                  <Text style={estLightbox.cerrarTxt}>✕</Text>
+                </Pressable>
+              </View>
+            )}
+
+            {/* Recortador con pellizco/arrastre: mismo patrón de overlay absoluto
+                que el lightbox (no un <Modal> anidado). */}
+            {ajustarAbierto && ajusteUri && (
+              <View style={estLightbox.raiz}>
+                <RecortadorFoto
+                  uri={ajusteUri}
+                  onCancelar={cancelarAjuste}
+                  onListo={(u, orig) => void alConfirmarRecorte(u, orig)}
+                />
+              </View>
+            )}
+          </>
+        ) : null
+      }
     >
       <Banner texto={error} tipo="error" />
 
@@ -460,9 +531,31 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
             radio={18}
           />
         </Pressable>
-        <View style={{ flexDirection: "row", gap: T.esps.lg, marginTop: T.esps.md }}>
+        {/* Acciones de la foto, todas en la misma fila y al mismo nivel.
+            "Quitar fondo" vivía suelto más abajo, después del selector de
+            unidad: ahí se leía como una opción del producto y no como algo
+            que se le hace a la foto, así que pasaba desapercibido. Aquí está
+            junto a Cámara y Galería, que es donde se busca. */}
+        <View
+          style={{
+            flexDirection: "row",
+            flexWrap: "wrap",
+            justifyContent: "center",
+            gap: T.esps.lg,
+            marginTop: T.esps.md,
+          }}
+        >
           <BotonFoto icono="camara" label="Cámara" onPress={() => cambiarFoto("camara")} />
           <BotonFoto icono="imagen" label="Galería" onPress={() => cambiarFoto("galeria")} />
+          {imagenUri && hayRecorte ? (
+            <BotonFoto
+              icono="imagen"
+              label={recortando ? "Quitando fondo…" : "Quitar fondo"}
+              onPress={() => {
+                if (!recortando) void recortarFondo();
+              }}
+            />
+          ) : null}
           {imagenUri ? (
             <Pressable onPress={quitarFoto} style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
               <Txt escala="pie" tono="peligro" fuerte>
@@ -545,20 +638,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
             </Txt>
           </Pressable>
         </View>
-      )}
-
-      {/* Quitar fondo: sirve para la foto del catálogo y para la propia */}
-      {imagenUri && hayRecorte && (
-        <Pressable
-          onPress={recortarFondo}
-          disabled={recortando}
-          style={{ flexDirection: "row", alignItems: "center", gap: T.esps.sm, marginBottom: T.esps.lg }}
-        >
-          <IconoUI id="imagen" size={16} color={T.textoSuave} />
-          <Txt escala="pie" tono="suave">
-            {recortando ? "Quitando fondo…" : "Quitar fondo"}
-          </Txt>
-        </Pressable>
       )}
 
       <Campo label="Nombre">
@@ -783,6 +862,7 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
         />
       </Campo>
 
+
       {/* Stock (solo producto normal) */}
       {!esKit && (
         <>
@@ -855,51 +935,6 @@ export default function FormularioProducto({ producto, categorias, onCerrar, onG
           el fondo sin tener que cerrarla primero.
           Overlay absoluto, NO un <Modal> anidado — un Modal dentro de otro
           Modal no siempre cubre toda la pantalla en React Native. */}
-      {lightboxAbierto && imagenUri && (
-        <View style={estLightbox.raiz}>
-          {/* Modo Rendimiento: el desenfoque con GPU es lo único pesado de
-              toda esta pantalla — en un dispositivo de gama baja se siente
-              con lag. Apagado, se compensa oscureciendo más fuerte en vez
-              de dejar la foto de fondo asomando sin difuminar. */}
-          {!prefs.modoRendimiento && (
-            <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-          )}
-          <View
-            style={[
-              StyleSheet.absoluteFill,
-              estLightbox.oscurecer,
-              prefs.modoRendimiento && { backgroundColor: "rgba(0,0,0,0.75)" },
-            ]}
-          />
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setLightboxAbierto(false)} />
-          <View style={estLightbox.imagenWrap} pointerEvents="box-none">
-            <Image source={{ uri: imagenUri }} style={estLightbox.imagen} resizeMode="contain" />
-          </View>
-          <View style={estLightbox.acciones}>
-            <BotonLightbox icono="imagen" label="Ajustar" onPress={() => accionDesdeLightbox(() => void abrirAjustarActual())} />
-            <BotonLightbox icono="camara" label="Cámara" onPress={() => accionDesdeLightbox(() => cambiarFoto("camara"))} />
-            <BotonLightbox icono="imagen" label="Galería" onPress={() => accionDesdeLightbox(() => cambiarFoto("galeria"))} />
-            {hayRecorte && (
-              <BotonLightbox icono="imagen" label="Quitar fondo" onPress={() => accionDesdeLightbox(() => void recortarFondo())} />
-            )}
-          </View>
-          <Pressable style={estLightbox.cerrar} onPress={() => setLightboxAbierto(false)} hitSlop={10}>
-            <Text style={estLightbox.cerrarTxt}>✕</Text>
-          </Pressable>
-        </View>
-      )}
-
-      {/* Recortador con pellizco/arrastre: mismo patrón de overlay absoluto
-          que el lightbox (no un <Modal> anidado). */}
-      {ajustarAbierto && ajusteUri && (
-        <View style={estLightbox.raiz}>
-          <RecortadorFoto
-            uri={ajusteUri}
-            onCancelar={cancelarAjuste}
-            onListo={(u, orig) => void alConfirmarRecorte(u, orig)}
-          />
-        </View>
-      )}
     </Hoja>
   );
 }

@@ -257,53 +257,80 @@ export default function RecortadorFoto({ uri, onCancelar, onListo }: Props) {
           en vez de una banda negra plana. */}
       <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
       <View style={[StyleSheet.absoluteFill, est.velo]} />
-      <SafeAreaView style={{ flex: 1 }}>
+      <SafeAreaView style={{ flex: 1 }} edges={["top", "bottom"]}>
+        {/* Cabecera: SOLO salida. La confirmacion ya no vive aqui — ver el
+            comentario del pie. */}
         <View style={est.cabecera}>
           <Pressable onPress={onCancelar} hitSlop={10} disabled={guardando}>
             <Text style={est.cabeceraBtn}>Cancelar</Text>
           </Pressable>
           <Text style={est.titulo}>Ajustar foto</Text>
-          <Pressable onPress={confirmar} disabled={!tam || guardando} hitSlop={10}>
-            <Text
-              style={[
-                est.cabeceraBtn,
-                est.cabeceraBtnPrincipal,
-                (!tam || guardando) && { opacity: 0.4 },
-              ]}
-            >
-              {guardando ? "Guardando…" : "Listo"}
-            </Text>
-          </Pressable>
+          {/* Hueco simetrico: mantiene el titulo centrado de verdad sin
+              recurrir a posicion absoluta. */}
+          <View style={est.huecoSimetrico} />
         </View>
 
         <View style={est.zona}>
           {!tam && !error && <ActivityIndicator color={T.acento} />}
           {error ? <Text style={est.error}>{error}</Text> : null}
           {tam && uriNorm && (
-            <View
-              style={est.marco}
-              onTouchStart={alIniciarToque}
-              onTouchMove={alMoverToque}
-              onTouchEnd={alSoltarToque}
-              onTouchCancel={alSoltarToque}
-            >
-              <Image
-                source={{ uri: uriNorm }}
-                resizeMode="cover"
-                style={{
-                  width: tam.w * visual.escala,
-                  height: tam.h * visual.escala,
-                  transform: [
-                    { translateX: visual.tx },
-                    { translateY: visual.ty },
-                  ],
-                }}
-              />
-            </View>
+            <>
+              <View
+                style={est.marco}
+                onTouchStart={alIniciarToque}
+                onTouchMove={alMoverToque}
+                onTouchEnd={alSoltarToque}
+                onTouchCancel={alSoltarToque}
+              >
+                <Image
+                  source={{ uri: uriNorm }}
+                  resizeMode="cover"
+                  style={{
+                    width: tam.w * visual.escala,
+                    height: tam.h * visual.escala,
+                    transform: [
+                      { translateX: visual.tx },
+                      { translateY: visual.ty },
+                    ],
+                  }}
+                />
+              </View>
+              {/* Pegada al marco, no al fondo de la pantalla: la pista
+                  pertenece a la foto y tiene que leerse junto a ella. */}
+              <Text style={est.ayuda}>Pellizca para acercar · arrastra para mover</Text>
+            </>
           )}
         </View>
 
-        <Text style={est.ayuda}>Pellizca para acercar · arrastra para mover</Text>
+        {/* CONFIRMAR ES UN BOTON PRIMARIO ABAJO, NO UN ENLACE ARRIBA
+            --------------------------------------------------------------
+            Antes "Listo" era texto pequeno en la esquina superior derecha,
+            mientras el "Crear producto" del formulario seguia visible abajo
+            a todo color. La jerarquia quedaba invertida: lo unico que se
+            leia como accion era el boton equivocado, y pulsarlo creaba el
+            producto SIN la foto, en silencio.
+            Ahora la accion que cierra este paso es la mas visible de la
+            pantalla y esta donde el pulgar ya espera encontrarla. */}
+        <View style={est.pie}>
+          <Pressable
+            onPress={confirmar}
+            disabled={!tam || guardando}
+            style={({ pressed }) => [
+              est.btnListo,
+              { backgroundColor: T.acentoRelleno },
+              (!tam || guardando) && { opacity: 0.45 },
+              pressed && { opacity: 0.85 },
+            ]}
+          >
+            {guardando ? (
+              <ActivityIndicator color={T.acentoTexto} />
+            ) : (
+              <Text style={[est.btnListoTxt, { color: T.acentoTexto }]}>
+                Usar esta foto
+              </Text>
+            )}
+          </Pressable>
+        </View>
       </SafeAreaView>
     </View>
   );
@@ -324,7 +351,8 @@ function crearEstilos(T: ReturnType<typeof useTema>["tema"]) {
     },
     titulo: { color: "#fff", fontSize: 15, fontWeight: "700" },
     cabeceraBtn: { color: "#fff", fontSize: 15, opacity: 0.85 },
-    cabeceraBtnPrincipal: { color: T.acento, fontWeight: "800", opacity: 1 },
+    // Ancho aproximado de "Cancelar": equilibra la fila sin medir texto.
+    huecoSimetrico: { width: 66 },
     zona: { flex: 1, alignItems: "center", justifyContent: "center" },
     marco: {
       width: LADO,
@@ -350,7 +378,24 @@ function crearEstilos(T: ReturnType<typeof useTema>["tema"]) {
       color: "#ffffffaa",
       textAlign: "center",
       fontSize: 12.5,
-      marginBottom: 30,
+      marginTop: 18,
+    },
+    pie: {
+      paddingHorizontal: 20,
+      paddingTop: 14,
+      paddingBottom: 18,
+    },
+    btnListo: {
+      borderRadius: T.radio,
+      paddingVertical: 16,
+      alignItems: "center",
+      justifyContent: "center",
+      minHeight: 54,
+    },
+    btnListoTxt: {
+      fontSize: 16,
+      fontWeight: "800",
+      letterSpacing: -0.2,
     },
     error: {
       color: "#ff6b6b",

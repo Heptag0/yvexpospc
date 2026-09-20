@@ -12,6 +12,7 @@
 // Soft delete vía `eliminado` (las compras conservan el snapshot del nombre).
 
 import { bd, uuid, ahoraISO } from "./db";
+import { exigirPermiso } from "./permisos";
 import { RespuestaTicket } from "./escaner";
 import { proximaFechaVisita, etiquetaAviso } from "./visitas";
 import { encolar } from "./sync";
@@ -118,11 +119,16 @@ function diasAJson(dias: number[] | null | undefined): string | null {
 // ---------------------------------------------------------------------------
 
 export async function crearProveedor(datos: DatosProveedor): Promise<string> {
+  await exigirPermiso("gestionarProveedores");
   const nombre = datos.nombre.trim();
   if (!nombre) throw new Error("El nombre del proveedor no puede estar vacío.");
   const db = await bd();
   const id = uuid();
   const ahora = ahoraISO();
+    // Escritura y encolado en la MISMA transacción: la regla del proyecto (o
+  // los dos, o ninguno). Sueltos, un fallo entre medias deja un cambio que
+  // existe en este teléfono y que la nube nunca verá.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `INSERT INTO proveedores (id, nombre, contacto, telefono, notas, dias_visita, eliminado, creado_en, actualizado_en)
      VALUES (?,?,?,?,?,?,0,?,?)`,
@@ -143,15 +149,21 @@ export async function crearProveedor(datos: DatosProveedor): Promise<string> {
     dias_visita: diasAJson(datos.diasVisita), eliminado: 0,
     creado_en: ahora, actualizado_en: ahora,
   });
+  });
   return id;
 }
 
 export async function editarProveedor(id: string, datos: DatosProveedor): Promise<void> {
+  await exigirPermiso("gestionarProveedores");
   const nombre = datos.nombre.trim();
   if (!nombre) throw new Error("El nombre del proveedor no puede estar vacío.");
   const db = await bd();
   const actualizado_en = ahoraISO();
   const dias_visita = diasAJson(datos.diasVisita);
+    // Escritura y encolado en la MISMA transacción: la regla del proyecto (o
+  // los dos, o ninguno). Sueltos, un fallo entre medias deja un cambio que
+  // existe en este teléfono y que la nube nunca verá.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `UPDATE proveedores
         SET nombre = ?, contacto = ?, telefono = ?, notas = ?, dias_visita = ?, actualizado_en = ?
@@ -171,18 +183,25 @@ export async function editarProveedor(id: string, datos: DatosProveedor): Promis
     telefono: datos.telefono?.trim() || null, notas: datos.notas?.trim() || null,
     dias_visita, eliminado: 0, actualizado_en,
   }, "update");
+  });
 }
 
 /** Soft delete: el historial de compras NO se borra (guarda el snapshot
  *  del nombre en proveedor_nombre). */
 export async function eliminarProveedor(id: string): Promise<void> {
+  await exigirPermiso("gestionarProveedores");
   const db = await bd();
   const actualizado_en = ahoraISO();
+    // Escritura y encolado en la MISMA transacción: la regla del proyecto (o
+  // los dos, o ninguno). Sueltos, un fallo entre medias deja un cambio que
+  // existe en este teléfono y que la nube nunca verá.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     "UPDATE proveedores SET eliminado = 1, actualizado_en = ? WHERE id = ?",
     [actualizado_en, id]
   );
   await encolar("proveedores", id, { id, eliminado: 1, actualizado_en }, "update");
+  });
 }
 
 /** Lista de proveedores activos, cada uno con su resumen de compras.
@@ -293,6 +312,7 @@ export type DatosCompra = {
  *  proveedor_id y proveedor_nombre en NULL: histórico general sin dueño
  *  (decisión documentada: mejor registrar el surtido que perderlo). */
 export async function registrarCompra(datos: DatosCompra): Promise<string> {
+  await exigirPermiso("registrarCompra");
   const db = await bd();
   let proveedorId: string | null = null;
   const proveedorNombre = datos.proveedorNombre?.trim() || null;
@@ -301,6 +321,10 @@ export async function registrarCompra(datos: DatosCompra): Promise<string> {
   }
   const id = uuid();
   const ahora = ahoraISO();
+    // Escritura y encolado en la MISMA transacción: la regla del proyecto (o
+  // los dos, o ninguno). Sueltos, un fallo entre medias deja un cambio que
+  // existe en este teléfono y que la nube nunca verá.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     `INSERT INTO compras
        (id, proveedor_id, proveedor_nombre, folio, fecha, tipo, total_centavos,
@@ -329,6 +353,7 @@ export async function registrarCompra(datos: DatosCompra): Promise<string> {
     num_lineas: Math.max(0, Math.round(datos.numLineas ?? 0)),
     origen: datos.origen ?? "manual", notas: datos.notas?.trim() || null,
     eliminado: 0, creado_en: ahora, actualizado_en: ahora,
+  });
   });
   return id;
 }
@@ -371,13 +396,19 @@ export async function historialCompras(proveedorId?: string | null): Promise<Com
 }
 
 export async function eliminarCompra(id: string): Promise<void> {
+  await exigirPermiso("registrarCompra");
   const db = await bd();
   const actualizado_en = ahoraISO();
+    // Escritura y encolado en la MISMA transacción: la regla del proyecto (o
+  // los dos, o ninguno). Sueltos, un fallo entre medias deja un cambio que
+  // existe en este teléfono y que la nube nunca verá.
+  await db.withTransactionAsync(async () => {
   await db.runAsync(
     "UPDATE compras SET eliminado = 1, actualizado_en = ? WHERE id = ?",
     [actualizado_en, id]
   );
   await encolar("compras", id, { id, eliminado: 1, actualizado_en }, "update");
+  });
 }
 
 // ---------------------------------------------------------------------------

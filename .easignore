@@ -1,0 +1,80 @@
+# Qué NO se sube a los servidores de EAS Build.
+#
+# El archivo de proyecto pesaba 376 MB porque dentro de la carpeta del móvil
+# conviven copias enteras del proyecto de PC, respaldos, scripts de backend en
+# Python y material de trabajo. Nada de eso interviene en compilar el AAB.
+#
+# DOS COSAS IMPORTANTES
+#
+# 1. En cuanto existe un .easignore, EAS DEJA DE USAR .gitignore. Por eso aquí
+#    se repiten exclusiones obvias (node_modules, .expo…): si faltaran, se
+#    subirían igualmente.
+#
+# 2. Se excluye `android/` A PROPÓSITO. Si esa carpeta se sube, EAS compila con
+#    el build.gradle que haya dentro y NO ejecuta prebuild, así que el plugin
+#    expo-build-properties no se aplica y targetSdkVersion se queda como
+#    estuviera. Excluyéndola, EAS la regenera en cada build y el plugin manda
+#    siempre — que es lo que garantiza API 36.
+#    Si algún día editas a mano algo dentro de android/, quita esta línea y
+#    mueve ese cambio a un config plugin.
+
+# --- Copias del proyecto de escritorio que viven dentro del móvil ---
+# Fotos viejas del POS de PC, con versiones anteriores del código.
+entrega-pc/
+pc/
+pc-proyecto/
+
+# --- Respaldos ---
+_backup_/
+_backup_componentes/
+_respaldos_css/
+**/*_prev.tsx
+**/*.bak
+
+# --- Nativo y dependencias: EAS los regenera ---
+node_modules/
+android/
+ios/
+.expo/
+dist/
+web-build/
+
+# --- Backend y utilidades en Python (no forman parte de la app) ---
+__pycache__/
+backend-models.py
+backend-models_espejo.py
+backend-sync.py
+backend-sync_bajar.py
+verificar_backend.py
+limpiar_modal.py
+
+# --- Pruebas sueltas y archivos de apoyo ---
+test-*.mjs
+scripts/reset-project.js
+estructura_movil.txt
+captura-sync.jpg
+
+# --- Material de trabajo ---
+capturas/
+referencias/
+docs/
+*.apk
+*.aab
+*.fdb
+*.sqlite
+*.db
+
+# --- Documentación y notas ---
+AGENTS.md
+CLAUDE.md
+README.md
+.claude/
+
+# --- Sistema y editor ---
+.git/
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+npm-debug.log*
+yarn-error.log*

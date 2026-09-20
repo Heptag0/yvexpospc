@@ -61,6 +61,14 @@ export type TiendaLocal = {
   entregaDomicilio: boolean;
   costoEnvioCentavos: number;
   pagoEfectivo: boolean;
+  /** Tarjeta al recibir, con la terminal del negocio. Apagado por defecto:
+   *  no todos los negocios tienen terminal. */
+  pagoTerminal: boolean;
+  /** Se guarda pero SIN EFECTO en el checkout — "pago en línea" quedó
+   *  desactivado en el servidor a propósito (PENDIENTES.md punto 28: las
+   *  pasarelas reales exigen importe fijo al generar el link, y aquí lo
+   *  decide el cliente al armar su carrito). En desarrollo para una futura
+   *  versión con una pasarela de verdad. */
   linkPago: string;
   ocultarAgotados: boolean;
   bannerBase64: string | null;
@@ -171,6 +179,7 @@ const CLAVES_TIENDA = [
   "tienda_entrega_domicilio",
   "tienda_costo_envio_centavos",
   "tienda_pago_efectivo",
+  "tienda_pago_terminal",
   "tienda_link_pago",
   "tienda_ocultar_agotados",
   "tienda_banner_base64",
@@ -217,6 +226,10 @@ export async function leerTiendaLocal(): Promise<TiendaLocal> {
     costoEnvioCentavos:
       isFinite(costoEnvio) && costoEnvio > 0 ? Math.round(costoEnvio) : 0,
     pagoEfectivo: m.get("tienda_pago_efectivo") !== "0",
+    // Arranca APAGADO (a diferencia de pagoEfectivo): no todos los
+    // negocios tienen terminal, así que el default correcto es "no", no
+    // "sí a menos que se apague".
+    pagoTerminal: m.get("tienda_pago_terminal") === "1",
     linkPago: m.get("tienda_link_pago") ?? "",
     ocultarAgotados: m.get("tienda_ocultar_agotados") === "1",
     bannerBase64: m.get("tienda_banner_base64") ?? null,
@@ -241,6 +254,7 @@ export async function guardarTiendaLocal(
     entregaDomicilio: boolean;
     costoEnvioCentavos: number;
     pagoEfectivo: boolean;
+    pagoTerminal: boolean;
     linkPago: string;
     ocultarAgotados: boolean;
     bannerBase64: string | null;
@@ -282,6 +296,8 @@ export async function guardarTiendaLocal(
     );
   if (parcial.pagoEfectivo !== undefined)
     await guardarConfig("tienda_pago_efectivo", parcial.pagoEfectivo ? "1" : "0");
+  if (parcial.pagoTerminal !== undefined)
+    await guardarConfig("tienda_pago_terminal", parcial.pagoTerminal ? "1" : "0");
   if (parcial.linkPago !== undefined)
     await guardarConfig("tienda_link_pago", parcial.linkPago);
   if (parcial.ocultarAgotados !== undefined)
@@ -512,6 +528,7 @@ export async function publicarTienda(): Promise<ResultadoPublicar> {
       entrega_domicilio: cfg.entregaDomicilio,
       costo_envio_centavos: cfg.entregaDomicilio ? cfg.costoEnvioCentavos : 0,
       pago_efectivo: cfg.pagoEfectivo,
+      pago_terminal: cfg.pagoTerminal,
       link_pago: cfg.linkPago,
       ocultar_agotados: cfg.ocultarAgotados,
       // --- v3 ---

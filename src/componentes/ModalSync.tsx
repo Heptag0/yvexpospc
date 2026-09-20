@@ -17,7 +17,6 @@ import {
   ScrollView,
   Pressable,
   StyleSheet,
-  Alert,
   Switch,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
@@ -26,14 +25,20 @@ import {
   estadoSync,
   sincronizar,
   hayCatalogoLocal,
-  archivarCatalogoLocal,
+  readaptarCatalogoSiCambioNegocio,
   contarArchivados,
   restaurarArchivados,
   resincronizarDesdeCero,
   inspeccionarCola,
   leerSyncAuto,
   guardarSyncAuto,
+  detectarConflictosCatalogo,
+  fusionarDepartamentosDuplicados,
+  prepararTrasVincular,
+  subirCatalogoLocal,
+  ConflictoProducto,
 } from "@/src/base/sync";
+import ModalConflictosCatalogo from "@/src/componentes/ModalConflictosCatalogo";
 import { fmtFecha } from "@/src/base/formato";
 import { useTema } from "@/src/componentes/TemaProvider";
 import { Boton, Banner, CabeceraModal } from "@/src/componentes/ui";
@@ -90,18 +95,34 @@ export default function ModalSync({
   const [cola, setCola] = useState<any[]>([]);
   const [detalles, setDetalles] = useState(false);
   const [syncAuto, setSyncAuto] = useState(true);
+  const [conflictos, setConflictos] = useState<ConflictoProducto[]>([]);
+  const [conflictosAbiertos, setConflictosAbiertos] = useState(false);
 
   const cargar = useCallback(async () => {
-    const [e, l, a, sa] = await Promise.all([
+    // ANTES DE CONTAR NADA: si el telefono cambio de negocio, los productos
+    // que quedaron marcados como 'nube' del negocio anterior vuelven a ser
+    // locales. Sin esto, hayCatalogoLocal() devuelve 0 y la tarjeta para
+    // agregarlos al catalogo no aparece nunca — el catalogo se quedaba sin
+    // subir en silencio. Ver readaptarCatalogoSiCambioNegocio() en sync.ts.
+    //
+    // Va aqui y no en la vinculacion porque es idempotente y no depende de
+    // por que pantalla se haya vinculado: si el negocio no cambio, no hace
+    // nada. Conviene llamarla tambien justo despues de vincular, para que la
+    // tarjeta aparezca sin tener que entrar a esta pantalla.
+    await readaptarCatalogoSiCambioNegocio();
+
+    const [e, l, a, sa, c] = await Promise.all([
       estadoSync(),
       hayCatalogoLocal(),
       contarArchivados(),
       leerSyncAuto(),
+      detectarConflictosCatalogo(),
     ]);
     setEstado(e);
     setLocales(l);
     setArchivados(a);
     setSyncAuto(sa);
+    setConflictos(c);
   }, []);
 
   useEffect(() => {
@@ -144,44 +165,60 @@ export default function ModalSync({
     }
   }
 
-  function preguntarAdopcion() {
-    Alert.alert(
-      "Adoptar el catálogo del negocio",
-      `Este teléfono tiene ${locales} producto${locales === 1 ? "" : "s"} propio${
-        locales === 1 ? "" : "s"
-      }.\n\n` +
-        "Al adoptar el catálogo del negocio, esos productos se ARCHIVAN " +
-        "(no se borran: quedan guardados) y el teléfono usará el catálogo " +
-        "compartido con tus otras cajas.\n\n" +
-        "Es lo recomendado si vas a usar este teléfono junto con tu computadora.",
-      [
-        { text: "Cancelar", style: "cancel" },
-        {
-          text: "Adoptar catálogo",
-          onPress: async () => {
-            setTrabajando(true);
-            limpiarAvisos();
-            try {
-              const n = await archivarCatalogoLocal("adopcion_catalogo_negocio");
-              const r = await sincronizar();
-              setAviso(
-                `${n} productos archivados. ${
-                  r.bajados > 0
-                    ? `Llegaron ${cambios(r.bajados)} del negocio.`
-                    : ""
-                }`
-              );
-              onCambio();
-              await cargar();
-            } catch (e: any) {
-              setError(mensajeErrorHumano(e?.message ?? String(e)));
-            } finally {
-              setTrabajando(false);
-            }
-          },
-        },
-      ]
-    );
+  /** Sube lo que sobrevivió sin conflicto (o todo, si nunca hubo ninguno) —
+   *  departamentos repetidos se fusionan solos primero, sin preguntar: un
+   *  nombre igual no tiene datos que valga la pena decidir uno por uno. */
+  async function fusionarLoQueNoChoca() {
+    const nDeptos = await fusionarDepartamentosDuplicados();
+    await prepararTrasVincular();
+    // La subida del catálogo vive aparte desde que se cazó el bug de los
+    // duplicados (ver sync.ts): solo se llama aquí, después de que
+    // revisarCatalogo() confirmó que no quedan conflictos por decidir.
+    await subirCatalogoLocal();
+    const r = await sincronizar();
+    const partes = [`Catálogo agregado al negocio.`];
+    if (nDeptos > 0) {
+      partes.push(`${nDeptos} departamento${nDeptos === 1 ? "" : "s"} repetido${nDeptos === 1 ? "" : "s"} se combinó solo.`);
+    }
+    if (r.bajados > 0) partes.push(`Llegaron ${cambios(r.bajados)} más del negocio.`);
+    setAviso(partes.join(" "));
+    onCambio();
+    await cargar();
+  }
+
+  async function revisarCatalogo() {
+    limpiarAvisos();
+    setTrabajando(true);
+    try {
+      // Se vuelve a comprobar aquí (no solo lo que ya trae cargar()) por si
+      // algo cambió desde que se abrió esta pantalla — el usuario pudo
+      // sincronizar manualmente justo antes de tocar este botón.
+      const detectados = await detectarConflictosCatalogo();
+      if (detectados.length > 0) {
+        setConflictos(detectados);
+        setConflictosAbiertos(true);
+      } else {
+        await fusionarLoQueNoChoca();
+      }
+    } catch (e: any) {
+      setError(mensajeErrorHumano(e?.message ?? String(e)));
+    } finally {
+      setTrabajando(false);
+    }
+  }
+
+  async function alResolverTodosLosConflictos() {
+    setConflictosAbiertos(false);
+    setTrabajando(true);
+    try {
+      // Lo que quedó sin conflicto (nunca chocó con nada) también se sube
+      // en este mismo paso — el dueño no tiene que volver a tocar nada.
+      await fusionarLoQueNoChoca();
+    } catch (e: any) {
+      setError(mensajeErrorHumano(e?.message ?? String(e)));
+    } finally {
+      setTrabajando(false);
+    }
   }
 
   async function alternarDetalles() {
@@ -271,11 +308,38 @@ export default function ModalSync({
                 </View>
               ) : null}
 
-              {/* Sincronización automática: decisión del usuario */}
+              {/* ---------------------------------------------------------
+                  ORDEN: ACCIÓN PRIMERO, AJUSTE DESPUÉS, REPARACIÓN AL FINAL
+                  ---------------------------------------------------------
+                  Antes esto iba: interruptor → dos botones pegados → una nota
+                  suelta debajo de los dos que en realidad solo hablaba del
+                  segundo. Tres problemas de una vez:
+
+                   · Quien abre esta pantalla casi siempre viene a tocar
+                     "Sincronizar ahora". Estaba en tercer lugar, después de
+                     un ajuste y de dos párrafos.
+                   · "Volver a bajar todo" —que rehace el catálogo entero—
+                     tenía el mismo peso visual que la copia de seguridad de
+                     todos los días, y su explicación quedaba a dos botones de
+                     distancia.
+                   · La nota "el botón siempre funciona" existía porque el
+                     botón estaba lejos del interruptor. Con el botón arriba
+                     ya no hace falta explicarlo.
+                  --------------------------------------------------------- */}
+              <View style={{ marginTop: 6 }}>
+                <Boton
+                  titulo="Sincronizar ahora"
+                  onPress={sincronizarAhora}
+                  cargando={trabajando}
+                />
+              </View>
+
+              {/* El ajuste, después de la acción: se toca una vez y no se
+                  vuelve a mirar. */}
               <View
                 style={[
                   e.caja,
-                  { backgroundColor: T.superficie, borderColor: T.borde },
+                  { backgroundColor: T.superficie, borderColor: T.borde, marginTop: 14 },
                 ]}
               >
                 <View style={e.filaSwitch}>
@@ -286,7 +350,7 @@ export default function ModalSync({
                     <Text style={[e.txt, { color: T.textoSuave }]}>
                       {syncAuto
                         ? "Prendida: la app respalda sola tras cada venta."
-                        : "Apagada: tus datos solo suben cuando tú pides la copia."}
+                        : "Apagada: tus datos solo suben cuando tú lo pides."}
                     </Text>
                   </View>
                   <Switch
@@ -296,87 +360,106 @@ export default function ModalSync({
                     thumbColor={T.texto}
                   />
                 </View>
-                <Text style={[e.pie, { color: T.textoTenue }]}>
-                  El botón "Sincronizar ahora" siempre funciona, esté prendida o
-                  apagada: es tu copia de seguridad, y tú decides cuándo hacerla.
-                </Text>
+                {/* El recuento de pendientes solo aquí, y solo cuando el
+                    automático está apagado: con él prendido la tarjeta de
+                    arriba ya lo dice, y repetirlo era decir dos veces lo
+                    mismo con distintas palabras. */}
                 {!syncAuto && estado.pendientes > 0 && (
-                  <Text
-                    style={[e.pie, { color: T.alerta, fontWeight: "700" }]}
-                  >
-                    Tienes {estado.pendientes} cambio
-                    {estado.pendientes === 1 ? "" : "s"} guardado
-                    {estado.pendientes === 1 ? "" : "s"} en este teléfono. Cuando
-                    quieras respaldarlo{estado.pendientes === 1 ? "" : "s"},
-                    toca "Sincronizar ahora".
+                  <Text style={[e.pie, { color: T.alerta, fontWeight: "700" }]}>
+                    {estado.pendientes} cambio
+                    {estado.pendientes === 1 ? "" : "s"} esperando a que toques
+                    "Sincronizar ahora".
                   </Text>
                 )}
               </View>
 
-              <View style={{ marginTop: 6, gap: 9 }}>
-                <Boton
-                  titulo="Sincronizar ahora"
-                  onPress={sincronizarAhora}
-                  cargando={trabajando}
-                />
-                <Boton
-                  titulo="Volver a bajar todo"
-                  tipo="secundario"
-                  onPress={async () => {
-                    limpiarAvisos();
-                    setTrabajando(true);
-                    try {
-                      const r = await resincronizarDesdeCero();
-                      if (r.ok) {
-                        setAviso(
-                          r.bajados > 0
-                            ? `Listo ✓ Llegó el catálogo completo del negocio (${cambios(r.bajados)}).`
-                            : "El negocio no tiene datos que bajar."
-                        );
-                        onCambio();
-                      } else {
-                        setError(mensajeErrorHumano(r.error ?? ""));
+              {/* La reparación, aparte y al final. No es una acción de
+                  todos los días y no debe parecerlo: su explicación va ANTES
+                  del botón, que es donde se lee. */}
+              <View
+                style={[
+                  e.caja,
+                  { backgroundColor: T.superficie, borderColor: T.borde, marginTop: 14 },
+                ]}
+              >
+                <Text style={[e.titulo, { color: T.texto }]}>
+                  ¿Algo se descuadró?
+                </Text>
+                <Text style={[e.txt, { color: T.textoSuave }]}>
+                  Pide de nuevo el catálogo completo del negocio. Tus ventas de
+                  este teléfono no se tocan.
+                </Text>
+                <View style={{ marginTop: 10 }}>
+                  <Boton
+                    titulo="Volver a bajar todo"
+                    tipo="secundario"
+                    onPress={async () => {
+                      limpiarAvisos();
+                      setTrabajando(true);
+                      try {
+                        const r = await resincronizarDesdeCero();
+                        if (r.ok) {
+                          setAviso(
+                            r.bajados > 0
+                              ? `Listo ✓ Llegó el catálogo completo del negocio (${cambios(r.bajados)}).`
+                              : "El negocio no tiene datos que bajar."
+                          );
+                          onCambio();
+                        } else {
+                          setError(mensajeErrorHumano(r.error ?? ""));
+                        }
+                        await cargar();
+                      } finally {
+                        setTrabajando(false);
                       }
-                      await cargar();
-                    } finally {
-                      setTrabajando(false);
-                    }
-                  }}
-                />
+                    }}
+                  />
+                </View>
               </View>
-              <Text style={[e.pie, { color: T.textoTenue, marginTop: -4 }]}>
-                "Volver a bajar todo" pide de nuevo el catálogo completo del
-                negocio. Útil si algo se descuadró.
-              </Text>
 
-              {/* Adopción del catálogo */}
+              {/* Catálogo de este teléfono */}
               {locales > 0 && (
                 <View
                   style={[
                     e.caja,
                     {
                       backgroundColor: T.superficie,
-                      borderColor: T.bordeFuerte,
+                      borderColor: conflictos.length > 0 ? T.alerta : T.bordeFuerte,
                       marginTop: 22,
                     },
                   ]}
                 >
                   <Text style={[e.titulo, { color: T.texto }]}>
-                    Catálogo de este teléfono
+                    {conflictos.length > 0
+                      ? `${conflictos.length} producto${conflictos.length === 1 ? "" : "s"} coincide${conflictos.length === 1 ? "" : "n"} con el negocio`
+                      : "Catálogo de este teléfono"}
                   </Text>
                   <Text style={[e.txt, { color: T.textoSuave }]}>
-                    Tienes {locales} producto{locales === 1 ? "" : "s"} creado
-                    {locales === 1 ? "" : "s"} en este teléfono.
-                    {"\n\n"}
-                    Si también usas YvexPOS en tu computadora, lo recomendable es
-                    adoptar el catálogo del negocio: así ambos ven el mismo
-                    inventario y el mismo stock.
+                    {conflictos.length > 0 ? (
+                      "Tienes productos que parecen ser los mismos que ya existen en el negocio " +
+                      "(mismo código de barras o nombre). Elige cuál versión de cada uno se queda " +
+                      "antes de que el resto de tu catálogo se agregue solo."
+                    ) : (
+                      <>
+                        Tienes {locales} producto{locales === 1 ? "" : "s"} creado
+                        {locales === 1 ? "" : "s"} en este teléfono, y ninguno coincide con lo que
+                        ya tiene el negocio.
+                        {"\n\n"}
+                        Se pueden agregar tal cual a tu catálogo compartido — nada que decidir,
+                        nada que perder.
+                      </>
+                    )}
                   </Text>
                   <View style={{ marginTop: 14 }}>
                     <Boton
-                      titulo="Adoptar el catálogo del negocio"
+                      titulo={
+                        conflictos.length > 0
+                          ? "Revisar y decidir"
+                          : "Agregar al catálogo del negocio"
+                      }
                       tipo="secundario"
-                      onPress={preguntarAdopcion}
+                      onPress={revisarCatalogo}
+                      cargando={trabajando}
                     />
                   </View>
                 </View>
@@ -405,8 +488,25 @@ export default function ModalSync({
                         setTrabajando(true);
                         limpiarAvisos();
                         try {
-                          const n = await restaurarArchivados();
-                          setAviso(`${n} productos devueltos al inventario.`);
+                          const r = await restaurarArchivados();
+                          const partes: string[] = [];
+                          partes.push(
+                            r.restaurados === 1
+                              ? "1 producto devuelto al inventario."
+                              : `${r.restaurados} productos devueltos al inventario.`
+                          );
+                          // Los omitidos NO son un error: se quedan
+                          // archivados porque el negocio ya tiene ese mismo
+                          // producto. Restaurarlos dejaría dos artículos con
+                          // el mismo código y el lector no sabría cuál es.
+                          if (r.omitidos > 0) {
+                            partes.push(
+                              r.omitidos === 1
+                                ? "1 se quedó archivado porque el negocio ya tiene ese mismo producto: restaurarlo dejaría dos con el mismo código. Si quieres tus datos, edita el del negocio desde Inventario."
+                                : `${r.omitidos} se quedaron archivados porque el negocio ya tiene esos mismos productos: restaurarlos dejaría dos con el mismo código. Si quieres tus datos, edítalos desde Inventario.`
+                            );
+                          }
+                          setAviso(partes.join(" "));
                           onCambio();
                           await cargar();
                         } catch (err: any) {
@@ -488,6 +588,13 @@ export default function ModalSync({
           )}
         </ScrollView>
       </SafeAreaView>
+      {conflictosAbiertos && (
+        <ModalConflictosCatalogo
+          conflictos={conflictos}
+          onResuelto={alResolverTodosLosConflictos}
+          onCerrar={() => setConflictosAbiertos(false)}
+        />
+      )}
     </Modal>
   );
 }
